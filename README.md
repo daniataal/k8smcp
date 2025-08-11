@@ -43,7 +43,7 @@ If `uv` is not installed or not found at `/usr/local/bin/uv`, use `python` direc
   "mcpServers": {
     "kubernetes-debugger": {
       "command": "python",
-      "args": ["/Users/datallah/Downloads/mcpk8s/main.py"],
+      "args": ["path/to/folder/k8smcp/main.py"],
       "env": {
         "CLAUDE_API_KEY": "your-api-key-here"
       }
@@ -64,7 +64,7 @@ Add this configuration to your Claude Desktop config file:
       "command": "/usr/local/bin/uv",
       "args": [
         "--directory",
-        "/Users/datallah/Downloads/mcpk8s",
+        "/path/to/folder/k8smcp",
         "run",
         "main.py"
       ],
@@ -83,7 +83,7 @@ Or if you prefer using Python directly:
   "mcpServers": {
     "kubernetes-debugger": {
       "command": "python",
-      "args": ["/Users/datallah/Downloads/mcpk8s/main.py"],
+      "args": ["/path/to/folder/k8smcp/main.py"],
       "env": {
         "CLAUDE_API_KEY": "your-api-key-here"
       }
@@ -99,7 +99,7 @@ Or if you prefer using Python directly:
   "mcpServers": {
     "kubernetes-debugger": {
       "command": "python",
-      "args": ["/Users/datallah/Downloads/mcpk8s/main.py"],
+      "args": ["/path/to/folder/k8smcp/main.py"],
       "env": {
         "CLAUDE_API_KEY": "your-api-key-here",
         "KUBECONFIG": "/path/to/kubeconfigfile"
