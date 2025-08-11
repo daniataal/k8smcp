@@ -311,13 +311,64 @@ class KubernetesDebugger:
         err = self._require_k8s()
         if err:
             return err
-        return {"status": "success", "description": {"name": params.get("name", "example-node")}}
+        
+        name = params.get("name")
+        if not name:
+            return {"status": "error", "message": "Node name is required"}
+        
+        try:
+            node = self.v1.read_node(name=name)
+            description = {
+                "metadata": {
+                    "name": node.metadata.name,
+                    "labels": node.metadata.labels,
+                    "annotations": node.metadata.annotations,
+                },
+                "status": {
+                    "conditions": [{
+                        "type": c.type,
+                        "status": c.status,
+                        "message": c.message
+                    } for c in node.status.conditions],
+                    "capacity": node.status.capacity,
+                    "allocatable": node.status.allocatable,
+                    "node_info": {
+                        "architecture": node.status.node_info.architecture,
+                        "container_runtime_version": node.status.node_info.container_runtime_version,
+                        "kernel_version": node.status.node_info.kernel_version,
+                        "os_image": node.status.node_info.os_image,
+                        "kubelet_version": node.status.node_info.kubelet_version
+                    }
+                }
+            }
+            return {"status": "success", "description": description}
+        except ApiException as e:
+            logger.error(f"Error describing node {name}: {e}")
+            return {"status": "error", "message": str(e)}
 
     def check_node_pressure(self, params):
         err = self._require_k8s()
         if err:
             return err
-        return {"status": "success", "pressure": {"example-node": "Normal"}}
+        
+        name = params.get("name")
+        if not name:
+            return {"status": "error", "message": "Node name is required"}
+        
+        try:
+            node = self.v1.read_node(name=name)
+            pressures = {}
+            for condition in node.status.conditions:
+                if condition.type in ["MemoryPressure", "DiskPressure", "PIDPressure"]:
+                    pressures[condition.type] = {
+                        "status": condition.status,
+                        "message": condition.message,
+                        "last_transition": str(condition.last_transition_time)
+                    }
+            return {"status": "success", "pressures": pressures}
+        except ApiException as e:
+            logger.error(f"Error checking node pressure for {name}: {e}")
+            return {"status": "error", "message": str(e)}
 
     def get_deployments(self, params):
         err = self._require_k8s()
@@ -403,73 +454,390 @@ class KubernetesDebugger:
         err = self._require_k8s()
         if err:
             return err
-        return {"status": "success", "result": "rollout managed"}
+        
+        name = params.get("name")
+        namespace = params.get("namespace", "default")
+        action = params.get("action", "status")  # status, pause, resume, restart, undo
+        
+        if not name:
+            return {"status": "error", "message": "Deployment name is required"}
+            
+        try:
+            if action == "restart":
+                body = {
+                    "spec": {
+                        "template": {
+                            "metadata": {
+                                "annotations": {
+                                    "kubectl.kubernetes.io/restartedAt": datetime.now().isoformat()
+                                }
+                            }
+                        }
+                    }
+                }
+                self.apps_v1.patch_namespaced_deployment(name, namespace, body)
+            elif action in ["pause", "resume"]:
+                body = {"spec": {"paused": action == "pause"}}
+                self.apps_v1.patch_namespaced_deployment(name, namespace, body)
+            
+            deployment = self.apps_v1.read_namespaced_deployment(name, namespace)
+            return {
+                "status": "success",
+                "rollout": {
+                    "name": name,
+                    "namespace": namespace,
+                    "action": action,
+                    "paused": deployment.spec.paused,
+                    "replicas": deployment.spec.replicas,
+                    "updated_replicas": deployment.status.updated_replicas,
+                    "ready_replicas": deployment.status.ready_replicas,
+                    "available_replicas": deployment.status.available_replicas
+                }
+            }
+        except ApiException as e:
+            logger.error(f"Error managing rollout for {name}: {e}")
+            return {"status": "error", "message": str(e)}
 
     def get_services(self, params):
         err = self._require_k8s()
         if err:
             return err
-        return {"status": "success", "services": [{"name": "example-service", "namespace": "default"}]}
+        
+        namespace = params.get("namespace", "default")
+        label_selector = params.get("label_selector", "")
+        
+        try:
+            services = self.v1.list_namespaced_service(namespace=namespace, label_selector=label_selector)
+            service_list = []
+            for svc in services.items:
+                service_list.append({
+                    "name": svc.metadata.name,
+                    "namespace": svc.metadata.namespace,
+                    "type": svc.spec.type,
+                    "cluster_ip": svc.spec.cluster_ip,
+                    "external_ip": svc.spec.external_i_ps if hasattr(svc.spec, 'external_i_ps') else None,
+                    "ports": [{
+                        "port": p.port,
+                        "target_port": p.target_port,
+                        "protocol": p.protocol,
+                        "node_port": p.node_port if hasattr(p, 'node_port') else None
+                    } for p in svc.spec.ports],
+                    "selector": svc.spec.selector
+                })
+            return {"status": "success", "services": service_list}
+        except ApiException as e:
+            logger.error(f"Error getting services: {e}")
+            return {"status": "error", "message": str(e)}
 
     def describe_service(self, params):
         err = self._require_k8s()
         if err:
             return err
-        return {"status": "success", "description": {"name": params.get("name", "example-service")}}
+        
+        name = params.get("name")
+        namespace = params.get("namespace", "default")
+        
+        if not name:
+            return {"status": "error", "message": "Service name is required"}
+            
+        try:
+            svc = self.v1.read_namespaced_service(name=name, namespace=namespace)
+            endpoints = self.v1.read_namespaced_endpoints(name=name, namespace=namespace)
+            
+            description = {
+                "metadata": {
+                    "name": svc.metadata.name,
+                    "namespace": svc.metadata.namespace,
+                    "labels": svc.metadata.labels,
+                    "annotations": svc.metadata.annotations
+                },
+                "spec": {
+                    "type": svc.spec.type,
+                    "cluster_ip": svc.spec.cluster_ip,
+                    "external_ips": svc.spec.external_i_ps if hasattr(svc.spec, 'external_i_ps') else None,
+                    "ports": [{
+                        "port": p.port,
+                        "target_port": p.target_port,
+                        "protocol": p.protocol,
+                        "node_port": p.node_port if hasattr(p, 'node_port') else None
+                    } for p in svc.spec.ports],
+                    "selector": svc.spec.selector
+                },
+                "endpoints": [{
+                    "addresses": [addr.ip for addr in subset.addresses] if subset.addresses else [],
+                    "ports": [{
+                        "port": p.port,
+                        "protocol": p.protocol
+                    } for p in subset.ports]
+                } for subset in endpoints.subsets] if endpoints.subsets else []
+            }
+            return {"status": "success", "description": description}
+        except ApiException as e:
+            logger.error(f"Error describing service {name}: {e}")
+            return {"status": "error", "message": str(e)}
 
     def get_configmaps(self, params):
         err = self._require_k8s()
         if err:
             return err
-        return {"status": "success", "configmaps": [{"name": "example-configmap", "namespace": "default"}]}
+        
+        namespace = params.get("namespace", "default")
+        label_selector = params.get("label_selector", "")
+        
+        try:
+            configmaps = self.v1.list_namespaced_config_map(namespace=namespace, label_selector=label_selector)
+            configmap_list = []
+            for cm in configmaps.items:
+                configmap_list.append({
+                    "name": cm.metadata.name,
+                    "namespace": cm.metadata.namespace,
+                    "data_keys": list(cm.data.keys()) if cm.data else [],
+                    "binary_data_keys": list(cm.binary_data.keys()) if cm.binary_data else []
+                })
+            return {"status": "success", "configmaps": configmap_list}
+        except ApiException as e:
+            logger.error(f"Error getting configmaps: {e}")
+            return {"status": "error", "message": str(e)}
 
     def get_secrets(self, params):
         err = self._require_k8s()
         if err:
             return err
-        return {"status": "success", "secrets": [{"name": "example-secret", "namespace": "default"}]}
+        
+        namespace = params.get("namespace", "default")
+        label_selector = params.get("label_selector", "")
+        
+        try:
+            secrets = self.v1.list_namespaced_secret(namespace=namespace, label_selector=label_selector)
+            secret_list = []
+            for secret in secrets.items:
+                secret_list.append({
+                    "name": secret.metadata.name,
+                    "namespace": secret.metadata.namespace,
+                    "type": secret.type,
+                    "data_keys": list(secret.data.keys()) if secret.data else []
+                })
+            return {"status": "success", "secrets": secret_list}
+        except ApiException as e:
+            logger.error(f"Error getting secrets: {e}")
+            return {"status": "error", "message": str(e)}
 
     def get_contexts(self, params):
         err = self._require_k8s()
         if err:
-            return err  # Return the error response if Kubernetes is not available
-        return {"status": "success", "contexts": ["context1", "context2"]}
+            return err
+        
+        try:
+            contexts = config.list_kube_config_contexts()
+            current = config.current_context
+            return {
+                "status": "success",
+                "contexts": [ctx["name"] for ctx in contexts[0]],
+                "current_context": current
+            }
+        except config.config_exception.ConfigException as e:
+            logger.error(f"Error getting contexts: {e}")
+            return {"status": "error", "message": str(e)}
 
     def use_context(self, params):
         err = self._require_k8s()
         if err:
-            return err  # Return the error response if Kubernetes is not available
-        context = params.get("context", "default-context")
-        return {"status": "success", "result": f"Switched to context {context}"}
+            return err
+        
+        context = params.get("context")
+        if not context:
+            return {"status": "error", "message": "Context name is required"}
+            
+        try:
+            config.load_kube_config(context=context)
+            return {"status": "success", "message": f"Switched to context {context}"}
+        except config.config_exception.ConfigException as e:
+            logger.error(f"Error switching context: {e}")
+            return {"status": "error", "message": str(e)}
 
     def apply_yaml(self, params):
         err = self._require_k8s()
         if err:
-            return err  # Return the error response if Kubernetes is not available
-        yaml_content = params.get("yaml", "")
-        return {"status": "success", "result": "Applied YAML successfully"}
+            return err
+        
+        yaml_content = params.get("yaml")
+        if not yaml_content:
+            return {"status": "error", "message": "YAML content is required"}
+            
+        try:
+            resources = list(yaml.safe_load_all(yaml_content))
+            results = []
+            
+            for resource in resources:
+                kind = resource["kind"]
+                name = resource["metadata"]["name"]
+                namespace = resource["metadata"].get("namespace", "default")
+                
+                try:
+                    # Create/update the resource using the appropriate API
+                    # This is a simplified version - you might want to add more resource types
+                    if kind.lower() == "deployment":
+                        self.apps_v1.replace_namespaced_deployment(
+                            name=name,
+                            namespace=namespace,
+                            body=resource
+                        )
+                    elif kind.lower() == "service":
+                        self.v1.replace_namespaced_service(
+                            name=name,
+                            namespace=namespace,
+                            body=resource
+                        )
+                    # Add more resource types as needed
+                    
+                    results.append({
+                        "kind": kind,
+                        "name": name,
+                        "namespace": namespace,
+                        "status": "applied"
+                    })
+                except ApiException as e:
+                    if e.status == 404:  # Resource doesn't exist, create it
+                        if kind.lower() == "deployment":
+                            self.apps_v1.create_namespaced_deployment(
+                                namespace=namespace,
+                                body=resource
+                            )
+                        elif kind.lower() == "service":
+                            self.v1.create_namespaced_service(
+                                namespace=namespace,
+                                body=resource
+                            )
+                        # Add more resource types as needed
+                        
+                        results.append({
+                            "kind": kind,
+                            "name": name,
+                            "namespace": namespace,
+                            "status": "created"
+                        })
+                    else:
+                        raise
+            
+            return {"status": "success", "results": results}
+        except Exception as e:
+            logger.error(f"Error applying YAML: {e}")
+            return {"status": "error", "message": str(e)}
 
     def delete_resource(self, params):
         err = self._require_k8s()
         if err:
-            return err  # Return the error response if Kubernetes is not available
-        resource_name = params.get("name", "example-resource")
-        return {"status": "success", "result": f"Deleted resource {resource_name}"}
+            return err
+        
+        kind = params.get("kind", "").lower()
+        name = params.get("name")
+        namespace = params.get("namespace", "default")
+        
+        if not kind or not name:
+            return {"status": "error", "message": "Resource kind and name are required"}
+            
+        try:
+            if kind == "deployment":
+                self.apps_v1.delete_namespaced_deployment(name=name, namespace=namespace)
+            elif kind == "service":
+                self.v1.delete_namespaced_service(name=name, namespace=namespace)
+            elif kind == "pod":
+                self.v1.delete_namespaced_pod(name=name, namespace=namespace)
+            elif kind == "configmap":
+                self.v1.delete_namespaced_config_map(name=name, namespace=namespace)
+            elif kind == "secret":
+                self.v1.delete_namespaced_secret(name=name, namespace=namespace)
+            else:
+                return {"status": "error", "message": f"Unsupported resource kind: {kind}"}
+                
+            return {
+                "status": "success",
+                "message": f"Deleted {kind} {name} in namespace {namespace}"
+            }
+        except ApiException as e:
+            logger.error(f"Error deleting resource: {e}")
+            return {"status": "error", "message": str(e)}
 
     def create_resource(self, params):
         err = self._require_k8s()
         if err:
-            return err  # Return the error response if Kubernetes is not available
-        resource_name = params.get("name", "example-resource")
-        return {"status": "success", "result": f"Created resource {resource_name}"}
+            return err
+        
+        kind = params.get("kind", "").lower()
+        name = params.get("name")
+        namespace = params.get("namespace", "default")
+        spec = params.get("spec", {})
+        
+        if not kind or not name:
+            return {"status": "error", "message": "Resource kind and name are required"}
+            
+        try:
+            body = {
+                "apiVersion": "v1",
+                "kind": kind.capitalize(),
+                "metadata": {
+                    "name": name,
+                    "namespace": namespace
+                },
+                "spec": spec
+            }
+            
+            if kind == "deployment":
+                body["apiVersion"] = "apps/v1"
+                result = self.apps_v1.create_namespaced_deployment(namespace=namespace, body=body)
+            elif kind == "service":
+                result = self.v1.create_namespaced_service(namespace=namespace, body=body)
+            elif kind == "pod":
+                result = self.v1.create_namespaced_pod(namespace=namespace, body=body)
+            elif kind == "configmap":
+                result = self.v1.create_namespaced_config_map(namespace=namespace, body=body)
+            elif kind == "secret":
+                result = self.v1.create_namespaced_secret(namespace=namespace, body=body)
+            else:
+                return {"status": "error", "message": f"Unsupported resource kind: {kind}"}
+                
+            return {
+                "status": "success",
+                "message": f"Created {kind} {name} in namespace {namespace}"
+            }
+        except ApiException as e:
+            logger.error(f"Error creating resource: {e}")
+            return {"status": "error", "message": str(e)}
 
     def port_forward(self, params):
         err = self._require_k8s()
         if err:
-            return err  # Return the error response if Kubernetes is not available
-        pod_name = params.get("pod", "example-pod")
-        port = params.get("port", 8080)
-        return {"status": "success", "result": f"Port-forwarded {pod_name} on port {port}"}
+            return err
+        
+        pod_name = params.get("pod")
+        namespace = params.get("namespace", "default")
+        local_port = params.get("local_port")
+        remote_port = params.get("remote_port")
+        
+        if not pod_name or not local_port or not remote_port:
+            return {
+                "status": "error",
+                "message": "Pod name, local port, and remote port are required"
+            }
+            
+        try:
+            pf = portforward(
+                self.v1.connect_get_namespaced_pod_portforward,
+                pod_name,
+                namespace,
+                ports=[f"{local_port}:{remote_port}"]
+            )
+            return {
+                "status": "success",
+                "message": f"Port forwarding established from localhost:{local_port} to {pod_name}:{remote_port}",
+                "pod": pod_name,
+                "namespace": namespace,
+                "local_port": local_port,
+                "remote_port": remote_port
+            }
+        except Exception as e:
+            logger.error(f"Error setting up port forward: {e}")
+            return {"status": "error", "message": str(e)}
 
     def query_prometheus(self, params):
         """
