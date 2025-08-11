@@ -205,7 +205,39 @@ class KubernetesDebugger:
         err = self._require_k8s()
         if err:
             return err
-        return {"status": "success", "logs": "Example log content"}
+
+        name = params.get("name")
+        namespace = params.get("namespace", "default")
+        container = params.get("container")
+        tail_lines = params.get("tail_lines")
+        since_seconds = params.get("since_seconds")
+        previous = params.get("previous", False)
+
+        if not name:
+            return {"status": "error", "message": "Pod name is required"}
+
+        try:
+            logs = self.v1.read_namespaced_pod_log(
+                name=name,
+                namespace=namespace,
+                container=container,
+                tail_lines=tail_lines,
+                since_seconds=since_seconds,
+                previous=previous
+            )
+            return {
+                "status": "success",
+                "logs": logs,
+                "pod": name,
+                "container": container,
+                "namespace": namespace
+            }
+        except ApiException as e:
+            logger.error(f"Error getting logs for pod {name}: {e}")
+            return {"status": "error", "message": str(e)}
+        except Exception as e:
+            logger.error(f"Unexpected error getting logs for pod {name}: {e}")
+            return {"status": "error", "message": str(e)}
 
     def execute_command_in_pod(self, params):
         """
