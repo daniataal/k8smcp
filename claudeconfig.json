@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "kubernetes-debugger": {
+      "command": "/usr/local/bin/uv",
+      "args": [
+        "--directory",
+        "path/to/mcp/folder",
+        "run",
+        "main.py"
+      ],
+      "env": {
+        "KUBECONFIG": "path/to/kubeconfig"
+      }
+    }
+  }
+}
