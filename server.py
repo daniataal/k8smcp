@@ -159,6 +159,16 @@ def create_mcp_server():
                 "issue": issue
             })
 
+        @mcp.tool()
+        def apply_yaml(yaml_content: str, dry_run: bool = False, server_side: bool = False, force: bool = False):
+            """Apply YAML content to the cluster"""
+            return k8s_debugger.apply_yaml({
+                "yaml": yaml_content,
+                "dry_run": dry_run,
+                "server_side": server_side,
+                "force": force
+            })
+
         return mcp
 
     except Exception as e:
