@@ -13,6 +13,8 @@ from fastmcp import FastMCP
 from kubernetes import client, config
 from k8s_debugger import KubernetesDebugger
 from claude_analyzer import ClaudeAnalyzer
+from dvc_manager import DVCManager
+from mlops_workflow import MLOpsWorkflow
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,6 +56,12 @@ def create_mcp_server():
 
         # Initialize Kubernetes debugger (pass k8s_available flag)
         k8s_debugger = KubernetesDebugger(claude_analyzer, k8s_available=k8s_available)
+
+        # Initialize DVC manager (assume repo_dir is current_dir)
+        dvc_manager = DVCManager(repo_dir=current_dir)
+
+        # Initialize MLOps workflow orchestrator
+        mlops_workflow = MLOpsWorkflow(claude_analyzer, base_dir=current_dir)
 
         # Create FastMCP server instance
         mcp = FastMCP("kubernetes-debugger")
@@ -168,6 +176,83 @@ def create_mcp_server():
                 "server_side": server_side,
                 "force": force
             })
+
+        # --- DVC tools ---
+        @mcp.tool()
+        def dvc_init():
+            """Initialize DVC in the current repo"""
+            return dvc_manager.init()
+
+        @mcp.tool()
+        def dvc_add(path: str):
+            """Add a file or directory to DVC tracking"""
+            return dvc_manager.add(path)
+
+        @mcp.tool()
+        def dvc_push():
+            """Push DVC-tracked data to remote storage"""
+            return dvc_manager.push()
+
+        @mcp.tool()
+        def dvc_pull():
+            """Pull DVC-tracked data from remote storage"""
+            return dvc_manager.pull()
+
+        @mcp.tool()
+        def dvc_status():
+            """Get DVC status"""
+            return dvc_manager.status()
+
+        @mcp.tool()
+        def dvc_repro():
+            """Reproduce DVC pipeline"""
+            return dvc_manager.repro()
+
+        # --- High-level MLOps workflow tool ---
+        @mcp.tool()
+        def mlops_generate_code(prompt: str, job_name: str = None):
+            """
+            Generate ML training/inference code, Dockerfiles, and K8s YAMLs from a high-level prompt.
+            """
+            job_dir = mlops_workflow.generate_job_dir(job_name)
+            return mlops_workflow.generate_code_and_configs(prompt, job_dir)
+
+        @mcp.tool()
+        def mlops_list_jobs():
+            """List all generated MLOps job directories and their files."""
+            return mlops_workflow.list_jobs()
+
+        @mcp.tool()
+        def mlops_get_job_files(job_id: str):
+            """Get all files and their contents for a given job."""
+            return mlops_workflow.get_job_files(job_id)
+
+        @mcp.tool()
+        def mlops_build_image(job_id: str, dockerfile: str, image_tag: str):
+            """
+            Build a container image using Podman for a given job and Dockerfile.
+            """
+            job_dir = os.path.join(current_dir, "mlops_jobs", job_id)
+            return mlops_workflow.build_image(job_dir, dockerfile, image_tag)
+
+        @mcp.tool()
+        def mlops_push_image(image_tag: str, job_id: str = None):
+            """
+            Push a container image to a registry using Podman.
+            """
+            job_dir = os.path.join(current_dir, "mlops_jobs", job_id) if job_id else None
+            return mlops_workflow.push_image(image_tag, job_dir=job_dir)
+
+        @mcp.tool()
+        def mlops_manage_images(job_id: str, training_tag: str = None, inference_tag: str = None):
+            """
+            Build and push training and/or inference images for a job using Podman.
+            Args:
+                job_id: Job ID
+                training_tag: Tag for training image (optional)
+                inference_tag: Tag for inference image (optional)
+            """
+            return mlops_workflow.manage_images(job_id, training_tag, inference_tag)
 
         return mcp
 

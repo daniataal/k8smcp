@@ -6,6 +6,7 @@ from kubernetes import client, config, watch
 from kubernetes.client.rest import ApiException
 from kubernetes.stream import stream
 from command_router import CommandRouter  # Removed relative import
+from dvc_manager import DVCManager
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ class KubernetesDebugger:
             self.custom_api = None
         self.claude_analyzer = claude_analyzer
         self.router = CommandRouter(self)
+        self.dvc_manager = DVCManager()
         self._register_commands()
 
     def _register_commands(self):
@@ -76,6 +78,14 @@ class KubernetesDebugger:
         self.router.register("diagnose", self.diagnose_cluster)
         self.router.register("analyze", self.analyze_resource)
         self.router.register("recommend", self.recommend_action)
+
+        # DVC operations
+        self.router.register("dvc init", lambda params: self.dvc_manager.init())
+        self.router.register("dvc add", lambda params: self.dvc_manager.add(params.get("path", "")))
+        self.router.register("dvc push", lambda params: self.dvc_manager.push())
+        self.router.register("dvc pull", lambda params: self.dvc_manager.pull())
+        self.router.register("dvc status", lambda params: self.dvc_manager.status())
+        self.router.register("dvc repro", lambda params: self.dvc_manager.repro())
 
     def handle_command(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Main entry point for handling commands"""
