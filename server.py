@@ -3,6 +3,7 @@
 import os
 import sys
 import logging
+from typing import Dict, Any, List, Optional  # Add this import line
 
 # Add the current directory to the Python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -15,6 +16,8 @@ from k8s_debugger import KubernetesDebugger
 from claude_analyzer import ClaudeAnalyzer
 from dvc_manager import DVCManager
 from mlops_workflow import MLOpsWorkflow
+from artifact_manager import ArtifactManager
+from workflow_orchestrator import WorkflowOrchestrator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,6 +65,16 @@ def create_mcp_server():
 
         # Initialize MLOps workflow orchestrator
         mlops_workflow = MLOpsWorkflow(claude_analyzer, base_dir=current_dir)
+
+        # Initialize artifact manager
+        artifact_manager = ArtifactManager(base_dir=current_dir)
+
+        # Initialize workflow orchestrator
+        workflow_orchestrator = WorkflowOrchestrator(
+            mlops_workflow=mlops_workflow,
+            k8s_debugger=k8s_debugger,
+            artifact_manager=artifact_manager
+        )
 
         # Create FastMCP server instance
         mcp = FastMCP("kubernetes-debugger")
@@ -253,6 +266,131 @@ def create_mcp_server():
                 inference_tag: Tag for inference image (optional)
             """
             return mlops_workflow.manage_images(job_id, training_tag, inference_tag)
+
+        # --- Artifact Management Tools ---
+        @mcp.tool()
+        def mlops_extract_model(job_id: str, pod_name: str, namespace: str = "default",
+                              container: str = None, model_path: str = "/app/model"):
+            """Extract model artifacts from a training pod"""
+            return artifact_manager.extract_model_from_pod(
+                job_id=job_id,
+                pod_name=pod_name,
+                namespace=namespace,
+                container=container,
+                model_path=model_path
+            )
+
+        @mcp.tool()
+        def mlops_copy_model(job_id: str, pod_name: str, namespace: str = "default",
+                           container: str = None, model_path: str = "/app/model"):
+            """Copy model artifacts to an inference pod"""
+            return artifact_manager.copy_model_to_pod(
+                job_id=job_id,
+                pod_name=pod_name,
+                namespace=namespace,
+                container=container,
+                model_path=model_path
+            )
+
+        @mcp.tool()
+        def mlops_create_model_storage(job_id: str, namespace: str = "default",
+                                     storage_class: str = "standard", size: str = "1Gi"):
+            """Create persistent storage for model artifacts"""
+            return artifact_manager.create_model_pvc(
+                job_id=job_id,
+                namespace=namespace,
+                storage_class=storage_class,
+                size=size
+            )
+
+        @mcp.tool()
+        def mlops_cleanup_artifacts(job_id: str):
+            """Clean up artifacts for a specific job"""
+            return artifact_manager.cleanup_artifacts(job_id)
+
+        # --- Inference Service Management Tools ---
+        @mcp.tool()
+        def mlops_deploy_inference(job_id: str, image_tag: str, namespace: str = "default",
+                                 replicas: int = 1, resource_requests: dict = None,
+                                 resource_limits: dict = None):
+            """Deploy an inference service for a trained model"""
+            return mlops_workflow.deploy_inference(
+                job_id=job_id,
+                image_tag=image_tag,
+                namespace=namespace,
+                replicas=replicas,
+                resource_requests=resource_requests,
+                resource_limits=resource_limits
+            )
+
+        @mcp.tool()
+        def mlops_update_inference(job_id: str, namespace: str = "default",
+                                 image_tag: str = None, replicas: int = None):
+            """Update an existing inference service"""
+            return mlops_workflow.update_inference(
+                job_id=job_id,
+                namespace=namespace,
+                image_tag=image_tag,
+                replicas=replicas
+            )
+
+        @mcp.tool()
+        def mlops_get_inference_status(job_id: str, namespace: str = "default"):
+            """Get status of an inference service"""
+            return mlops_workflow.get_inference_status(
+                job_id=job_id,
+                namespace=namespace
+            )
+
+        # --- High-level Workflow Tools ---
+        @mcp.tool()
+        def mlops_execute_workflow(prompt: str):
+            """
+            Execute a complete MLOps workflow from a natural language prompt.
+            Examples:
+            - "Train an MNIST classifier using PyTorch and deploy it"
+            - "Build and deploy a sentiment analysis model"
+            - "Create an object detection service using YOLOv8"
+            """
+            return workflow_orchestrator.execute_workflow(prompt)
+
+        @mcp.tool()
+        def mlops_run_inference(job_id: str, data: Any):
+            """Run inference on a deployed model"""
+            return workflow_orchestrator.run_inference(job_id, data)
+
+        # --- LLM and Recommendation Model Tools ---
+        @mcp.tool()
+        def mlops_create_recommendation_model(task_description: str, data_format: str, features: List[str]):
+            """
+            Create a recommendation model from description.
+            
+            Examples:
+            - "Product recommendation system based on user purchase history"
+            - "Movie recommender using user ratings and genres"
+            - "Content recommendation based on user browsing behavior"
+            """
+            return mlops_workflow.create_recommendation_model(
+                task_description=task_description,
+                data_format=data_format,
+                features=features
+            )
+
+        @mcp.tool()
+        def mlops_finetune_llm(task_description: str, data_format: str, framework: str = "pytorch"):
+            """
+            Generate and set up LLM fine-tuning pipeline.
+            
+            Examples:
+            - "Fine-tune for sentiment analysis on product reviews"
+            - "Adapt language model for medical text classification"
+            - "Customize LLM for code completion in Python"
+            """
+            return mlops_workflow.finetune_llm(
+                task_description=task_description,
+                data_format=data_format,
+                framework=framework
+            )
 
         return mcp
 

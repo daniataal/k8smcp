@@ -1,0 +1,5 @@
+
+FROM pytorch/pytorch:latest
+WORKDIR /app
+COPY . .
+CMD ["python", "train.py"]

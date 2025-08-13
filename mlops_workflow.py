@@ -4,8 +4,12 @@ import uuid
 import time
 import subprocess
 import json
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any, Union, Tuple
 from claude_analyzer import ClaudeAnalyzer
+from artifact_manager import ArtifactManager
+from inference_manager import InferenceManager
+from kubernetes import client
+from llm_trainer import LLMTrainer
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +20,12 @@ class MLOpsWorkflow:
         os.makedirs(self.base_dir, exist_ok=True)
         self.registry = os.environ.get("CONTAINER_REGISTRY", "localhost:5000")
         self.podman_cmd = "podman"  # Can be configured via env var if needed
+        self.artifact_manager = ArtifactManager(base_dir)
+        self.inference_manager = InferenceManager(
+            k8s_apps_v1=client.AppsV1Api(),
+            k8s_core_v1=client.CoreV1Api()
+        )
+        self.llm_trainer = LLMTrainer(api_key=claude_analyzer.api_key)
 
     def generate_job_dir(self, job_name: str = None) -> str:
         timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -313,3 +323,185 @@ Format your response as a JSON list:
                 with open(fpath, "r") as f:
                     files[fname] = f.read()
         return {"status": "success", "job_id": job_id, "files": files}
+
+    def manage_training_artifacts(self, job_id: str, pod_name: str,
+                                namespace: str = "default") -> Dict[str, Any]:
+        """
+        Manage artifacts for a training job:
+        1. Create PVC if needed
+        2. Extract model from training pod
+        3. Clean up temporary files
+        """
+        # Create storage
+        storage_result = self.artifact_manager.create_model_pvc(job_id, namespace)
+        if storage_result["status"] != "success":
+            return storage_result
+
+        # Extract model
+        extract_result = self.artifact_manager.extract_model_from_pod(
+            job_id, pod_name, namespace
+        )
+        if extract_result["status"] != "success":
+            return extract_result
+
+        return {
+            "status": "success",
+            "storage": storage_result,
+            "artifacts": extract_result
+        }
+
+    def setup_inference_artifacts(self, job_id: str, pod_name: str,
+                                namespace: str = "default") -> Dict[str, Any]:
+        """
+        Set up artifacts for inference:
+        1. Copy model to inference pod
+        2. Verify copy success
+        """
+        return self.artifact_manager.copy_model_to_pod(
+            job_id, pod_name, namespace
+        )
+
+    def get_volume_config(self, job_id: str) -> Dict[str, Any]:
+        """Get volume configuration for pods"""
+        return self.artifact_manager.get_volume_mounts(job_id)
+
+    def deploy_inference(self, job_id: str, image_tag: str, namespace: str = "default",
+                        replicas: int = 1, resource_requests: Dict[str, str] = None,
+                        resource_limits: Dict[str, str] = None) -> Dict[str, Any]:
+        """
+        Deploy an inference service for a trained model.
+        
+        Args:
+            job_id: Job ID
+            image_tag: Inference image tag
+            namespace: Kubernetes namespace
+            replicas: Number of replicas
+            resource_requests: Resource requests for the pod
+            resource_limits: Resource limits for the pod
+        """
+        # First, ensure model artifacts are properly set up
+        storage_result = self.artifact_manager.create_model_pvc(job_id, namespace)
+        if storage_result["status"] != "success":
+            return storage_result
+
+        # Deploy the inference service
+        return self.inference_manager.deploy_inference_service(
+            job_id=job_id,
+            image=image_tag,
+            namespace=namespace,
+            replicas=replicas,
+            resource_requests=resource_requests,
+            resource_limits=resource_limits
+        )
+
+    def update_inference(self, job_id: str, namespace: str = "default",
+                        image_tag: Optional[str] = None,
+                        replicas: Optional[int] = None) -> Dict[str, Any]:
+        """Update an existing inference service."""
+        return self.inference_manager.update_inference_service(
+            job_id=job_id,
+            namespace=namespace,
+            image=image_tag,
+            replicas=replicas
+        )
+
+    def get_inference_status(self, job_id: str, 
+                           namespace: str = "default") -> Dict[str, Any]:
+        """Get status of an inference service."""
+        return self.inference_manager.get_inference_status(
+            job_id=job_id,
+            namespace=namespace
+        )
+
+    def create_recommendation_model(self, task_description: str, data_format: str,
+                                  features: List[str]) -> Dict[str, Any]:
+        """
+        Create a recommendation model from description.
+        
+        Args:
+            task_description: Description of the recommendation task
+            data_format: Description of input data format
+            features: List of features to use
+        """
+        # Generate recommendation system code
+        system = self.llm_trainer.generate_recommendation_system(
+            task_type="recommendation",
+            data_description=task_description,
+            features=features
+        )
+        
+        if "status" in system and system["status"] == "error":
+            return system
+
+        # Create job directory
+        job_id = f"recsys-{int(time.time())}"
+        job_dir = self.generate_job_dir(job_id)
+
+        # Save generated files
+        for filename, content in system.items():
+            with open(os.path.join(job_dir, filename), 'w') as f:
+                f.write(content)
+
+        # Generate Dockerfile and K8s configs
+        docker_result = self.generate_code_and_configs(
+            f"Create a recommendation system with {task_description}",
+            job_id
+        )
+
+        return {
+            "status": "success",
+            "job_id": job_id,
+            "files": list(system.keys()),
+            "docker_config": docker_result
+        }
+
+    def finetune_llm(self, task_description: str, data_format: str,
+                     framework: str = "pytorch") -> Dict[str, Any]:
+        """
+        Generate and set up LLM fine-tuning pipeline.
+        
+        Args:
+            task_description: Description of the fine-tuning task
+            data_format: Description of training data format
+            framework: ML framework to use
+        """
+        # Generate fine-tuning configuration
+        config = self.llm_trainer.generate_finetuning_config(
+            task_description,
+            data_format
+        )
+        
+        if "status" in config and config["status"] == "error":
+            return config
+
+        # Generate training code
+        training_code = self.llm_trainer.generate_training_code(
+            config,
+            framework
+        )
+        
+        if "status" in training_code and training_code["status"] == "error":
+            return training_code
+
+        # Create job directory
+        job_id = f"finetune-{int(time.time())}"
+        job_dir = self.generate_job_dir(job_id)
+
+        # Save generated files
+        for filename, content in training_code.items():
+            with open(os.path.join(job_dir, filename), 'w') as f:
+                f.write(content)
+
+        # Generate Dockerfile and K8s configs
+        docker_result = self.generate_code_and_configs(
+            f"Fine-tune LLM for {task_description}",
+            job_id
+        )
+
+        return {
+            "status": "success",
+            "job_id": job_id,
+            "config": config,
+            "files": list(training_code.keys()),
+            "docker_config": docker_result
+        }
