@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class KubernetesDebugger:
     def __init__(self, claude_analyzer, k8s_available=True):
         self.k8s_available = k8s_available
-        if k8s_available:
+        if (k8s_available):
             self.v1 = client.CoreV1Api()
             self.apps_v1 = client.AppsV1Api()
             self.networking_v1 = client.NetworkingV1Api()
@@ -48,6 +48,8 @@ class KubernetesDebugger:
         self.router.register("describe deployment", self.describe_deployment)
         self.router.register("scale", self.scale_deployment)
         self.router.register("rollout", self.manage_rollout)
+        self.router.register("delete deployment", self.delete_deployment)
+        self.router.register("delete all deployments", self.delete_all_deployments)
         
         # Service operations
         self.router.register("get services", self.get_services)
@@ -299,6 +301,37 @@ class KubernetesDebugger:
             logger.error(f"Unexpected error while executing command in pod {pod_name}: {e}")
             return {"status": "error", "message": str(e)}
 
+    def ensure_delete_deployment_rbac(self, namespace="default"):
+        """
+        Ensure the default service account has permission to delete deployments in the given namespace.
+        """
+        rbac_yaml = f"""
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployment-deleter
+  namespace: {namespace}
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["delete", "get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: deployment-deleter-binding
+  namespace: {namespace}
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: {namespace}
+roleRef:
+  kind: Role
+  name: deployment-deleter
+  apiGroup: rbac.authorization.k8s.io
+"""
+        return self.apply_yaml({"yaml": rbac_yaml})
+
     def get_nodes(self, params):
         err = self._require_k8s()
         if err:
@@ -508,6 +541,101 @@ class KubernetesDebugger:
             logger.error(f"Error managing rollout for {name}: {e}")
             return {"status": "error", "message": str(e)}
 
+    def delete_deployment(self, params):
+        """
+        Delete a Kubernetes deployment by name and namespace.
+        Args:
+            params: dict with 'name' and optional 'namespace'
+        Returns:
+            dict with status and message
+        """
+        err = self._require_k8s()
+        if err:
+            return err
+        name = params.get("name")
+        namespace = params.get("namespace", "default")
+        if not name:
+            return {"status": "error", "message": "Deployment name is required."}
+        try:
+            self.apps_v1.delete_namespaced_deployment(name=name, namespace=namespace)
+            return {
+                "status": "success",
+                "message": f"Deleted deployment '{name}' in namespace '{namespace}'."
+            }
+        except Exception as e:
+            logger.error(f"Error deleting deployment {name}: {e}")
+            return {"status": "error", "message": str(e)}
+
+    def delete_all_deployments(self, params):
+        """Delete all deployments in a namespace using direct API calls."""
+        err = self._require_k8s()
+        if err:
+            return err
+
+        namespace = params.get("namespace", "default")
+        force = params.get("force", False)
+        timeout = params.get("timeout_seconds", 60)
+
+        try:
+            # List deployments
+            deployments = self.apps_v1.list_namespaced_deployment(namespace=namespace)
+
+            if not deployments.items:
+                return {
+                    "status": "success",
+                    "message": f"No deployments found in namespace {namespace}"
+                }
+
+            results = []
+            delete_options = client.V1DeleteOptions(
+                propagation_policy='Foreground',
+                grace_period_seconds=0 if force else timeout
+            )
+
+            # Delete each deployment using direct API call
+            for deployment in deployments.items:
+                name = deployment.metadata.name
+                try:
+                    self.apps_v1.delete_namespaced_deployment(
+                        name=name,
+                        namespace=namespace,
+                        body=delete_options
+                    )
+                    results.append({
+                        "name": name,
+                        "status": "deleted"
+                    })
+                except ApiException as e:
+                    results.append({
+                        "name": name,
+                        "status": "error",
+                        "error": str(e)
+                    })
+
+            successes = sum(1 for r in results if r["status"] == "deleted")
+            failures = sum(1 for r in results if r["status"] == "error")
+
+            return {
+                "status": "success" if failures == 0 else "partial_success",
+                "summary": f"Deleted {successes} deployments, {failures} failures",
+                "namespace": namespace,
+                "results": results
+            }
+
+        except ApiException as e:
+            logger.error(f"Failed to delete deployments in namespace {namespace}: {e}")
+            return {
+                "status": "error",
+                "message": f"API error: {str(e)}",
+                "code": e.status
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error deleting deployments: {e}")
+            return {
+                "status": "error", 
+                "message": f"Unexpected error: {str(e)}"
+            }
+
     def get_services(self, params):
         err = self._require_k8s()
         if err:
@@ -685,8 +813,25 @@ class KubernetesDebugger:
                 
                 try:
                     # Create/update the resource using the appropriate API
-                    # This is a simplified version - you might want to add more resource types
-                    if kind.lower() == "deployment":
+                    if kind.lower() == "persistentvolumeclaim":
+                        self.v1.replace_namespaced_persistent_volume_claim(
+                            name=name,
+                            namespace=namespace,
+                            body=resource
+                        )
+                    elif kind.lower() == "configmap":
+                        self.v1.replace_namespaced_config_map(
+                            name=name,
+                            namespace=namespace,
+                            body=resource
+                        )
+                    elif kind.lower() == "job":
+                        self.batch_v1.replace_namespaced_job(
+                            name=name,
+                            namespace=namespace,
+                            body=resource
+                        )
+                    elif kind.lower() == "deployment":
                         self.apps_v1.replace_namespaced_deployment(
                             name=name,
                             namespace=namespace,
@@ -698,7 +843,6 @@ class KubernetesDebugger:
                             namespace=namespace,
                             body=resource
                         )
-                    # Add more resource types as needed
                     
                     results.append({
                         "kind": kind,
@@ -708,7 +852,22 @@ class KubernetesDebugger:
                     })
                 except ApiException as e:
                     if e.status == 404:  # Resource doesn't exist, create it
-                        if kind.lower() == "deployment":
+                        if kind.lower() == "persistentvolumeclaim":
+                            self.v1.create_namespaced_persistent_volume_claim(
+                                namespace=namespace,
+                                body=resource
+                            )
+                        elif kind.lower() == "configmap":
+                            self.v1.create_namespaced_config_map(
+                                namespace=namespace,
+                                body=resource
+                            )
+                        elif kind.lower() == "job":
+                            self.batch_v1.create_namespaced_job(
+                                namespace=namespace,
+                                body=resource
+                            )
+                        elif kind.lower() == "deployment":
                             self.apps_v1.create_namespaced_deployment(
                                 namespace=namespace,
                                 body=resource
@@ -718,7 +877,6 @@ class KubernetesDebugger:
                                 namespace=namespace,
                                 body=resource
                             )
-                        # Add more resource types as needed
                         
                         results.append({
                             "kind": kind,
@@ -1062,4 +1220,206 @@ class KubernetesDebugger:
             return {"status": "success", "recommendations": recommendations}
         except Exception as e:
             logger.error(f"Failed to recommend actions: {e}")
+            return {"status": "error", "message": str(e)}
+
+    def deploy_ml_stack(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy a complete ML training and inference stack."""
+        
+        name = params.get("name", f"ml-{int(time.time())}")
+        framework = params.get("framework", "pytorch")
+        
+        # Create ConfigMap for requirements
+        requirements_yaml = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": f"{name}-requirements"
+            },
+            "data": {
+                "requirements.txt": "\n".join([
+                    "torch",
+                    "torchvision",
+                    "flask",
+                    "numpy",
+                    "pillow"
+                ])
+            }
+        }
+
+        # Create PVC
+        pvc_yaml = {
+            "apiVersion": "v1",
+            "kind": "PersistentVolumeClaim",
+            "metadata": {"name": f"{name}-models"},
+            "spec": {
+                "accessModes": ["ReadWriteOnce"],
+                "resources": {"requests": {"storage": "1Gi"}}
+            }
+        }
+
+        # Create training job with init container for dependencies
+        training_yaml = {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {"name": f"{name}-training"},
+            "spec": {
+                "template": {
+                    "spec": {
+                        "initContainers": [{
+                            "name": "install-deps",
+                            "image": "python:3.9",
+                            "command": ["pip", "install", "-r", "/requirements/requirements.txt"],
+                            "volumeMounts": [{
+                                "name": "requirements",
+                                "mountPath": "/requirements"
+                            }]
+                        }],
+                        "containers": [{
+                            "name": "trainer",
+                            "image": "python:3.9",
+                            "command": ["python"],
+                            "args": ["-c", params.get("training_code", "")],
+                            "volumeMounts": [
+                                {
+                                    "name": "model-storage",
+                                    "mountPath": "/models"
+                                }
+                            ],
+                            "resources": {
+                                "requests": {
+                                    "cpu": "500m",
+                                    "memory": "2Gi"
+                                },
+                                "limits": {
+                                    "cpu": "2",
+                                    "memory": "4Gi"
+                                }
+                            }
+                        }],
+                        "volumes": [
+                            {
+                                "name": "model-storage",
+                                "persistentVolumeClaim": {
+                                    "claimName": f"{name}-models"
+                                }
+                            },
+                            {
+                                "name": "requirements",
+                                "configMap": {
+                                    "name": f"{name}-requirements"
+                                }
+                            }
+                        ],
+                        "restartPolicy": "Never"
+                    }
+                }
+            }
+        }
+
+        # Create inference deployment with init container
+        inference_yaml = {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {"name": f"{name}-inference"},
+            "spec": {
+                "replicas": params.get("replicas", 1),
+                "selector": {"matchLabels": {"app": f"{name}-inference"}},
+                "template": {
+                    "metadata": {"labels": {"app": f"{name}-inference"}},
+                    "spec": {
+                        "initContainers": [{
+                            "name": "install-deps",
+                            "image": "python:3.9",
+                            "command": ["pip", "install", "-r", "/requirements/requirements.txt"],
+                            "volumeMounts": [{
+                                "name": "requirements",
+                                "mountPath": "/requirements"
+                            }]
+                        }],
+                        "containers": [{
+                            "name": "inference",
+                            "image": "python:3.9",
+                            "command": ["python"],
+                            "args": ["-c", params.get("inference_code", "")],
+                            "volumeMounts": [
+                                {
+                                    "name": "model-storage",
+                                    "mountPath": "/models"
+                                }
+                            ],
+                            "ports": [{"containerPort": 8080}],
+                            "resources": {
+                                "requests": {
+                                    "cpu": "500m",
+                                    "memory": "1Gi"
+                                },
+                                "limits": {
+                                    "cpu": "1",
+                                    "memory": "2Gi"
+                                }
+                            }
+                        }],
+                        "volumes": [
+                            {
+                                "name": "model-storage",
+                                "persistentVolumeClaim": {
+                                    "claimName": f"{name}-models"
+                                }
+                            },
+                            {
+                                "name": "requirements",
+                                "configMap": {
+                                    "name": f"{name}-requirements"
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+
+        # Create service for inference
+        service_yaml = {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {"name": f"{name}-inference"},
+            "spec": {
+                "selector": {"app": f"{name}-inference"},
+                "ports": [{"port": 8080, "targetPort": 8080}],
+                "type": "ClusterIP"
+            }
+        }
+
+        try:
+            # Apply resources in order
+            resources = [
+                ("ConfigMap", requirements_yaml),
+                ("PVC", pvc_yaml),
+                ("Training Job", training_yaml),
+                ("Inference Deployment", inference_yaml),
+                ("Service", service_yaml)
+            ]
+
+            results = []
+            for resource_type, resource in resources:
+                result = self.apply_yaml({"yaml": yaml.dump(resource)})
+                if result["status"] != "success":
+                    return {
+                        "status": "error",
+                        "message": f"Failed to create {resource_type}",
+                        "details": result
+                    }
+                results.append(result)
+
+            return {
+                "status": "success",
+                "name": name,
+                "resources": results,
+                "endpoints": {
+                    "inference": f"http://{name}-inference:8080/predict"
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to deploy ML stack: {e}")
             return {"status": "error", "message": str(e)}

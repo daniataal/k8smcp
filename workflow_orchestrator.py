@@ -1,7 +1,8 @@
 import logging
-from typing import Dict, Any, Optional
-import time
 import os
+import time
+import yaml
+from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -12,20 +13,146 @@ class WorkflowOrchestrator:
         self.mlops = mlops_workflow
         self.k8s = k8s_debugger
         self.artifacts = artifact_manager
+        
+        # Complete fallback templates for when Claude is not available
         self.fallback_templates = {
             "mnist": {
                 "train.py": """
 import torch
-import torchvision
 import torch.nn as nn
-# Standard MNIST training code
-# ...
+import torch.optim as optim
+import torch.nn.functional as F
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
+import os
+
+# Define CNN model for MNIST
+class MNISTNet(nn.Module):
+    def __init__(self):
+        super(MNISTNet, self).__init__()
+        self.conv1 = nn.Conv2d(1, 32, 3, 1)
+        self.conv2 = nn.Conv2d(32, 64, 3, 1)
+        self.dropout1 = nn.Dropout(0.25)
+        self.dropout2 = nn.Dropout(0.5)
+        self.fc1 = nn.Linear(9216, 128)
+        self.fc2 = nn.Linear(128, 10)
+    
+    def forward(self, x):
+        x = self.conv1(x)
+        x = F.relu(x)
+        x = self.conv2(x)
+        x = F.relu(x)
+        x = F.max_pool2d(x, 2)
+        x = self.dropout1(x)
+        x = torch.flatten(x, 1)
+        x = self.fc1(x)
+        x = F.relu(x)
+        x = self.dropout2(x)
+        x = self.fc2(x)
+        return F.log_softmax(x, dim=1)
+
+# Set device
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
+
+# Data transformations
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.1307,), (0.3081,))
+])
+
+# Download and load training data
+train_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+
+# Download and load test data
+test_dataset = datasets.MNIST('./data', train=False, transform=transform)
+test_loader = DataLoader(test_dataset, batch_size=1000)
+
+# Initialize model, optimizer and loss function
+model = MNISTNet().to(device)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+criterion = nn.CrossEntropyLoss()
+
+# Training function
+def train(epochs):
+    model.train()
+    for epoch in range(epochs):
+        for batch_idx, (data, target) in enumerate(train_loader):
+            data, target = data.to(device), target.to(device)
+            optimizer.zero_grad()
+            output = model(data)
+            loss = criterion(output, target)
+            loss.backward()
+            optimizer.step()
+            
+            if batch_idx % 100 == 0:
+                print(f'Train Epoch: {epoch+1} [{batch_idx * len(data)}/{len(train_
 """,
                 "inference.py": """
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import torch
-# Standard MNIST inference code
-# ...
+import torch.nn.functional as F
+from torchvision import transforms
+from PIL import Image
+import io
+
+app = Flask(__name__)
+
+# Define CNN model for MNIST (same as in train.py)
+class MNISTNet(nn.Module):
+    def __init__(self):
+        super(MNISTNet, self).__init__()
+        self.conv1 = nn.Conv2d(1, 32, 3, 1)
+        self.conv2 = nn.Conv2d(32, 64, 3, 1)
+        self.dropout1 = nn.Dropout(0.25)
+        self.dropout2 = nn.Dropout(0.5)
+        self.fc1 = nn.Linear(9216, 128)
+        self.fc2 = nn.Linear(128, 10)
+    
+    def forward(self, x):
+        x = self.conv1(x)
+        x = F.relu(x)
+        x = self.conv2(x)
+        x = F.relu(x)
+        x = F.max_pool2d(x, 2)
+        x = self.dropout1(x)
+        x = torch.flatten(x, 1)
+        x = self.fc1(x)
+        x = F.relu(x)
+        x = self.dropout2(x)
+        x = self.fc2(x)
+        return F.log_softmax(x, dim=1)
+
+# Load the trained model
+model = MNISTNet()
+model.load_state_dict(torch.load("mnist_cnn.pt"))
+model.eval()
+
+# Define transformation
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.1307,), (0.3081,))
+])
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+    
+    file = request.files['file']
+    img_bytes = file.read()
+    img = Image.open(io.BytesIO(img_bytes)).convert('L')
+    img = transform(img).unsqueeze(0)
+    
+    with torch.no_grad():
+        output = model(img)
+        pred = output.argmax(dim=1, keepdim=True)
+    
+    return jsonify({'prediction': pred.item()})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080)
 """,
                 "Dockerfile.train": """
 FROM pytorch/pytorch:latest
