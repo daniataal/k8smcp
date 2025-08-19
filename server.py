@@ -257,6 +257,40 @@ def create_mcp_server():
             return mlops_workflow.get_job_files(job_id)
 
         @mcp.tool()
+        def mlops_list_experiments():
+            """List all logged MLOps experiments."""
+            return mlops_workflow.list_experiments()
+
+        # --- Model Registry Tools ---
+        @mcp.tool()
+        def mlops_register_model(model_id: str, job_id: str, model_path: str, metrics: Dict[str, Any] = None, hyperparameters: Dict[str, Any] = None, version: str = None, metadata: Dict[str, Any] = None):
+            """Registers a trained model with its metadata."""
+            return mlops_workflow.model_registry.register_model(
+                model_id=model_id,
+                job_id=job_id,
+                model_path=model_path,
+                metrics=metrics if metrics is not None else {},
+                hyperparameters=hyperparameters if hyperparameters is not None else {},
+                version=version,
+                metadata=metadata if metadata is not None else {}
+            )
+
+        @mcp.tool()
+        def mlops_list_registered_models():
+            """Lists all registered models."""
+            return mlops_workflow.model_registry.list_models()
+
+        @mcp.tool()
+        def mlops_get_model_details(model_id: str):
+            """Retrieves detailed information for a specific registered model."""
+            return mlops_workflow.model_registry.get_model_details(model_id)
+
+        @mcp.tool()
+        def mlops_update_model_status(model_id: str, new_status: str):
+            """Updates the status of a registered model (e.g., to staging, production, archived)."""
+            return mlops_workflow.model_registry.update_model_status(model_id, new_status)
+
+        @mcp.tool()
         def mlops_build_image(job_id: str, dockerfile: str, image_tag: str):
             """
             Build a container image using Podman for a given job and Dockerfile.
@@ -358,6 +392,50 @@ def create_mcp_server():
                 namespace=namespace
             )
 
+        @mcp.tool()
+        def mlops_get_inference_metrics(job_id: str, namespace: str = "default"):
+            """Simulate fetching inference metrics for a deployed model."""
+            return k8s_debugger.get_inference_metrics({
+                "job_id": job_id,
+                "namespace": namespace
+            })
+
+        @mcp.tool()
+        def mlops_check_model_health(job_id: str, namespace: str = "default"):
+            """Checks the health of a deployed model by simulating metrics and drift detection."""
+            metrics_result = k8s_debugger.get_inference_metrics({"job_id": job_id, "namespace": namespace})
+
+            if metrics_result["status"] != "success":
+                return metrics_result # Propagate error
+
+            metrics = metrics_result["metrics"]
+            drift_detected = metrics_result.get("drift_detected", False)
+            health_status = "Healthy"
+            recommendations = []
+
+            if drift_detected:
+                health_status = "Needs Attention"
+                recommendations.append("Investigate data/concept drift. Consider retraining the model with new data.")
+            
+            if metrics.get("error_rate", 0) > 0.05:
+                health_status = "Needs Attention"
+                recommendations.append(f"High error rate ({metrics["error_rate"]*100:.2f}%). Check inference logs for errors.")
+
+            if metrics.get("prediction_latency_ms_avg", 0) > 100:
+                health_status = "Warning"
+                recommendations.append(f"High prediction latency ({metrics["prediction_latency_ms_avg"]}ms). Consider optimizing the model or scaling resources.")
+
+            return {
+                "status": "success",
+                "job_id": job_id,
+                "namespace": namespace,
+                "health_status": health_status,
+                "metrics": metrics,
+                "drift_detected": drift_detected,
+                "recommendations": recommendations,
+                "message": f"Model health check for {job_id} completed."
+            }
+
         # --- High-level Workflow Tools ---
         @mcp.tool()
         def mlops_execute_workflow(prompt: str):
@@ -409,9 +487,22 @@ def create_mcp_server():
             )
 
         @mcp.tool()
+        def mlops_deploy_registered_model(model_id: str, namespace: str = "default", replicas: int = 1):
+            """Deploys an inference service for a model registered in the model registry."""
+            return mlops_workflow.deploy_registered_model(model_id, namespace, replicas)
+
+        @mcp.tool()
         def mlops_deploy_ml_stack(params: Dict[str, Any]):
             """Deploy a complete ML training and inference stack"""
             return k8s_debugger.deploy_ml_stack(params)
+
+        @mcp.tool()
+        def mlops_cleanup_job(job_id: str, namespace: str = "default"):
+            """Clean up all Kubernetes resources associated with a specific ML job ID."""
+            return k8s_debugger.cleanup_ml_job({
+                "job_id": job_id,
+                "namespace": namespace
+            })
 
         @mcp.tool()
         def create_pvc(name: str, size: str = "1Gi", namespace: str = "default", storage_class: str = None):

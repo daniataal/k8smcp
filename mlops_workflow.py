@@ -10,6 +10,7 @@ from artifact_manager import ArtifactManager
 from inference_manager import InferenceManager
 from kubernetes import client
 from llm_trainer import LLMTrainer
+from model_registry import ModelRegistry # Import ModelRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ class MLOpsWorkflow:
             k8s_core_v1=client.CoreV1Api()
         )
         self.llm_trainer = LLMTrainer(api_key=claude_analyzer.api_key)
+        self.model_registry = ModelRegistry(base_dir) # Initialize ModelRegistry
 
     def generate_job_dir(self, job_name: str = None) -> str:
         timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -53,8 +55,8 @@ You are an expert MLOps engineer. Given the following user prompt, generate:
 - Python inference code (inference.py) exposing a REST API (Flask or FastAPI)
 - Dockerfile for training (Dockerfile.train) that specifies the base image (e.g., pytorch/pytorch:latest or tensorflow/tensorflow:latest)
 - Dockerfile for inference (Dockerfile.infer) that specifies the base image (e.g., pytorch/pytorch:latest or tensorflow/tensorflow:latest)
-- Kubernetes YAML for training job (train_deploy.yaml)
-- Kubernetes YAML for inference deployment/service (infer_deploy.yaml)
+- Kubernetes YAML for training job (train_deploy.yaml) including resource requests/limits, and optionally GPU resource requests (e.g., nvidia.com/gpu: 1)
+- Kubernetes YAML for inference deployment/service (infer_deploy.yaml) including resource requests/limits, readiness/liveness probes (HTTP probe for port 8080), and optionally GPU resource requests
 - requirements.txt listing all Python dependencies
 - (Optional) DVC pipeline YAML (dvc.yaml) if data versioning is needed
 
@@ -329,6 +331,59 @@ Format your response as a JSON list:
                     files[fname] = f.read()
         return {"status": "success", "job_id": job_id, "files": files}
 
+    def _log_experiment_result(self, job_id: str, prompt: str, status: str, details: Dict[str, Any], metrics: Optional[Dict[str, Any]] = None, hyperparameters: Optional[Dict[str, Any]] = None) -> None:
+        """Logs the result of an MLOps experiment to a JSON file."""
+        job_dir = os.path.join(self.base_dir, job_id)
+        os.makedirs(job_dir, exist_ok=True) # Ensure job directory exists
+        log_file_path = os.path.join(job_dir, "experiment_log.json")
+
+        log_entry = {
+            "timestamp": time.time(),
+            "job_id": job_id,
+            "prompt": prompt,
+            "status": status,
+            "details": details,
+            "metrics": metrics,
+            "hyperparameters": hyperparameters
+        }
+
+        # Read existing logs if any, then append and write back
+        logs = []
+        if os.path.exists(log_file_path):
+            try:
+                with open(log_file_path, "r") as f:
+                    logs = json.load(f)
+            except json.JSONDecodeError:
+                logger.warning(f"Corrupted experiment log file: {log_file_path}. Starting fresh.")
+
+        logs.append(log_entry)
+
+        with open(log_file_path, "w") as f:
+            json.dump(logs, f, indent=4)
+        logger.info(f"Experiment result logged for job {job_id} with status {status}.")
+
+    def list_experiments(self) -> Dict[str, Any]:
+        """Lists all logged MLOps experiments across all job directories."""
+        all_experiments = []
+        for job_id in os.listdir(self.base_dir):
+            job_dir = os.path.join(self.base_dir, job_id)
+            log_file_path = os.path.join(job_dir, "experiment_log.json")
+            
+            if os.path.isdir(job_dir) and os.path.exists(log_file_path):
+                try:
+                    with open(log_file_path, "r") as f:
+                        experiments_in_job = json.load(f)
+                        all_experiments.extend(experiments_in_job)
+                except json.JSONDecodeError:
+                    logger.warning(f"Corrupted experiment log file found: {log_file_path}. Skipping.")
+                except Exception as e:
+                    logger.error(f"Error reading experiment log {log_file_path}: {e}")
+        
+        # Sort experiments by timestamp, most recent first
+        all_experiments.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+
+        return {"status": "success", "experiments": all_experiments}
+
     def manage_training_artifacts(self, job_id: str, pod_name: str,
                                 namespace: str = "default") -> Dict[str, Any]:
         """
@@ -417,6 +472,53 @@ Format your response as a JSON list:
             job_id=job_id,
             namespace=namespace
         )
+
+    def deploy_registered_model(self, model_id: str, namespace: str = "default", replicas: int = 1) -> Dict[str, Any]:
+        """Deploys an inference service for a model registered in the model registry."""
+        model_details_result = self.model_registry.get_model_details(model_id)
+        if model_details_result["status"] != "success":
+            return {"status": "error", "message": f"Failed to get details for model {model_id}: {model_details_result.get("message", "Unknown error")}"}
+        
+        model_details = model_details_result["model_details"]
+        job_id = model_details["job_id"]
+        model_path = model_details["model_path"]
+
+        # Assuming the inference image is tagged with {job_id}-infer:latest
+        image_tag = f"{job_id}-infer:latest"
+
+        # Simulate model validation before deployment
+        validation_result = self._simulate_model_validation(model_id, model_details)
+        if validation_result["status"] != "success":
+            return {"status": "error", "message": f"Model validation failed for {model_id}: {validation_result.get("message", "Unknown validation error")}"}
+
+        logger.info(f"Deploying registered model {model_id} (job_id: {job_id}) using image {image_tag}")
+
+        deploy_result = self.inference_manager.deploy_inference_service(
+            job_id=job_id, # Reusing job_id for deployment naming convention
+            image=image_tag,
+            namespace=namespace,
+            replicas=replicas,
+            # resource_requests and limits would ideally come from model_details or a deployment config
+        )
+        
+        if deploy_result["status"] == "success":
+            self.model_registry.update_model_status(model_id, "deployed")
+            return {
+                "status": "success",
+                "message": f"Successfully deployed model {model_id}.",
+                "deployment_details": deploy_result
+            }
+        else:
+            return {"status": "error", "message": f"Failed to deploy model {model_id}: {deploy_result.get("message", "Unknown deployment error")}"}
+
+    def _simulate_model_validation(self, model_id: str, model_details: Dict[str, Any]) -> Dict[str, Any]:
+        """Simulates a model validation process before deployment."""
+        logger.info(f"Simulating validation for model {model_id}...")
+        # In a real scenario, this would involve running tests, comparing metrics, etc.
+        # For now, a simple check or always success.
+        if model_details.get("metrics", {}).get("accuracy", 0) < 0.7: # Example validation rule
+            return {"status": "error", "message": "Simulated validation failed: Model accuracy too low."}
+        return {"status": "success", "message": "Simulated model validation passed."}
 
     def create_recommendation_model(self, task_description: str, data_format: str,
                                   features: List[str]) -> Dict[str, Any]:

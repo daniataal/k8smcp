@@ -1244,6 +1244,147 @@ roleRef:
             logger.error(f"Failed to recommend actions: {e}")
             return {"status": "error", "message": str(e)}
 
+    def get_inference_metrics(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Simulate fetching inference metrics for a deployed model."""
+        err = self._require_k8s()
+        if err:
+            return err
+        
+        job_id = params.get("job_id")
+        namespace = params.get("namespace", "default")
+
+        if not job_id:
+            return {"status": "error", "message": "Job ID is required to get inference metrics."}
+        
+        # In a real scenario, this would query Prometheus, a dedicated ML monitoring tool, etc.
+        # For now, return simulated data.
+        logger.info(f"Simulating fetching inference metrics for job {job_id} in namespace {namespace}")
+
+        simulated_metrics = {
+            "status": "success",
+            "job_id": job_id,
+            "namespace": namespace,
+            "metrics": {
+                "request_count": 1500 + hash(job_id) % 1000, # Simulated values
+                "prediction_latency_ms_avg": 50 + hash(job_id) % 20,
+                "error_rate": (hash(job_id) % 10) / 100.0,
+                "data_drift_score": (hash(job_id) % 50) / 100.0, # Placeholder for data drift
+                "model_version": f"v1.0.{hash(job_id) % 10}"
+            },
+            "drift_detected": (hash(job_id) % 3) == 0, # Simulate drift detection
+            "message": "Simulated inference metrics for the deployed model."
+        }
+        return simulated_metrics
+
+    def cleanup_ml_job(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Cleanup all Kubernetes resources associated with a specific ML job ID."""
+        err = self._require_k8s()
+        if err:
+            return err
+        
+        job_id = params.get("job_id")
+        namespace = params.get("namespace", "default")
+
+        if not job_id:
+            return {"status": "error", "message": "Job ID is required for cleanup."}
+
+        cleanup_results = []
+
+        # Delete Deployment and Service (inference stack)
+        inference_deployment_name = f"{job_id}-inference"
+        inference_service_name = f"{job_id}-inference"
+
+        # Delete Deployment
+        try:
+            self.apps_v1.delete_namespaced_deployment(name=inference_deployment_name, namespace=namespace)
+            cleanup_results.append({"resource": "Deployment", "name": inference_deployment_name, "status": "deleted"})
+        except ApiException as e:
+            if e.status == 404:
+                cleanup_results.append({"resource": "Deployment", "name": inference_deployment_name, "status": "not_found"})
+            else:
+                cleanup_results.append({"resource": "Deployment", "name": inference_deployment_name, "status": "error", "message": str(e)})
+                logger.error(f"Error deleting deployment {inference_deployment_name}: {e}")
+        except Exception as e:
+            cleanup_results.append({"resource": "Deployment", "name": inference_deployment_name, "status": "error", "message": str(e)})
+            logger.error(f"Unexpected error deleting deployment {inference_deployment_name}: {e}")
+
+        # Delete Service
+        try:
+            self.v1.delete_namespaced_service(name=inference_service_name, namespace=namespace)
+            cleanup_results.append({"resource": "Service", "name": inference_service_name, "status": "deleted"})
+        except ApiException as e:
+            if e.status == 404:
+                cleanup_results.append({"resource": "Service", "name": inference_service_name, "status": "not_found"})
+            else:
+                cleanup_results.append({"resource": "Service", "name": inference_service_name, "status": "error", "message": str(e)})
+                logger.error(f"Error deleting service {inference_service_name}: {e}")
+        except Exception as e:
+            cleanup_results.append({"resource": "Service", "name": inference_service_name, "status": "error", "message": str(e)})
+            logger.error(f"Unexpected error deleting service {inference_service_name}: {e}")
+
+        # Delete Training Job
+        training_job_name = f"{job_id}-training"
+        try:
+            self.batch_v1.delete_namespaced_job(name=training_job_name, namespace=namespace)
+            cleanup_results.append({"resource": "Job", "name": training_job_name, "status": "deleted"})
+        except ApiException as e:
+            if e.status == 404:
+                cleanup_results.append({"resource": "Job", "name": training_job_name, "status": "not_found"})
+            else:
+                cleanup_results.append({"resource": "Job", "name": training_job_name, "status": "error", "message": str(e)})
+                logger.error(f"Error deleting job {training_job_name}: {e}")
+        except Exception as e:
+            cleanup_results.append({"resource": "Job", "name": training_job_name, "status": "error", "message": str(e)})
+            logger.error(f"Unexpected error deleting job {training_job_name}: {e}")
+
+        # Delete PVC
+        pvc_name = f"{job_id}-models"
+        try:
+            self.v1.delete_namespaced_persistent_volume_claim(name=pvc_name, namespace=namespace)
+            cleanup_results.append({"resource": "PVC", "name": pvc_name, "status": "deleted"})
+        except ApiException as e:
+            if e.status == 404:
+                cleanup_results.append({"resource": "PVC", "name": pvc_name, "status": "not_found"})
+            else:
+                cleanup_results.append({"resource": "PVC", "name": pvc_name, "status": "error", "message": str(e)})
+                logger.error(f"Error deleting PVC {pvc_name}: {e}")
+        except Exception as e:
+            cleanup_results.append({"resource": "PVC", "name": pvc_name, "status": "error", "message": str(e)})
+            logger.error(f"Unexpected error deleting PVC {pvc_name}: {e}")
+
+        # Delete ConfigMaps (requirements, training code, inference code)
+        configmap_names = [
+            f"{job_id}-requirements",
+            f"{job_id}-train-code",
+            f"{job_id}-inference-code"
+        ]
+
+        for cm_name in configmap_names:
+            try:
+                self.v1.delete_namespaced_config_map(name=cm_name, namespace=namespace)
+                cleanup_results.append({"resource": "ConfigMap", "name": cm_name, "status": "deleted"})
+            except ApiException as e:
+                if e.status == 404:
+                    cleanup_results.append({"resource": "ConfigMap", "name": cm_name, "status": "not_found"})
+                else:
+                    cleanup_results.append({"resource": "ConfigMap", "name": cm_name, "status": "error", "message": str(e)})
+                    logger.error(f"Error deleting ConfigMap {cm_name}: {e}")
+            except Exception as e:
+                cleanup_results.append({"resource": "ConfigMap", "name": cm_name, "status": "error", "message": str(e)})
+                logger.error(f"Unexpected error deleting ConfigMap {cm_name}: {e}")
+
+
+        # Check if all resources were successfully deleted or not found
+        all_successful = all(r["status"] in ["deleted", "not_found"] for r in cleanup_results)
+
+        return {
+            "status": "success" if all_successful else "partial_success",
+            "job_id": job_id,
+            "namespace": namespace,
+            "results": cleanup_results,
+            "message": "Cleanup attempted for all associated resources."
+        }
+
     def deploy_ml_stack(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Deploy a complete ML training and inference stack."""
         
