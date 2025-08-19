@@ -182,12 +182,28 @@ def create_mcp_server():
 
         @mcp.tool()
         def apply_yaml(yaml_content: str, dry_run: bool = False, server_side: bool = False, force: bool = False):
-            """Apply YAML content to the cluster"""
+            """
+            Apply YAML content to the Kubernetes cluster.
+            This tool is intended ONLY for creating or updating resources.
+            DO NOT use this tool for deleting resources.
+            """
             return k8s_debugger.apply_yaml({
                 "yaml": yaml_content,
                 "dry_run": dry_run,
                 "server_side": server_side,
                 "force": force
+            })
+
+        @mcp.tool()
+        def delete_k8s_resource(kind: str, name: str, namespace: str = "default"):
+            """
+            Delete a Kubernetes resource by its kind and name.
+            This is the ONLY tool to be used for deleting Kubernetes resources.
+            """
+            return k8s_debugger.delete_resource({
+                "kind": kind,
+                "name": name,
+                "namespace": namespace
             })
 
         # --- DVC tools ---
@@ -398,8 +414,21 @@ def create_mcp_server():
             return k8s_debugger.deploy_ml_stack(params)
 
         @mcp.tool()
-        def create_pvc(name: str, size: str = "1Gi", namespace: str = "default", storage_class: str = "standard"):
+        def create_pvc(name: str, size: str = "1Gi", namespace: str = "default", storage_class: str = None):
             """Create a Persistent Volume Claim"""
+            # Dynamically determine storage class if not provided
+            if not storage_class:
+                sc_result = k8s_debugger.get_storage_classes({})
+                if sc_result["status"] == "success" and sc_result["storage_classes"]:
+                    if "standard" in sc_result["storage_classes"]:
+                        storage_class = "standard"
+                    elif sc_result["storage_classes"]:
+                        storage_class = sc_result["storage_classes"][0]
+                    else:
+                        return {"status": "error", "message": "No StorageClasses found in the cluster."}
+                else:
+                    return {"status": "error", "message": "Failed to retrieve StorageClasses."}
+
             pvc_yaml = f"""
 apiVersion: v1
 kind: PersistentVolumeClaim

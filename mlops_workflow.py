@@ -44,32 +44,37 @@ class MLOpsWorkflow:
             return {"status": "error", "message": "Claude LLM is not available."}
 
         # Compose a system prompt for the LLM
-        llm_prompt = [
+        llm_prompt =  [
             {
                 "role": "user",
-                "content": f"""
+                "content": f'''
 You are an expert MLOps engineer. Given the following user prompt, generate:
 - Python training code (train.py) using PyTorch or TensorFlow/Keras for the task
 - Python inference code (inference.py) exposing a REST API (Flask or FastAPI)
-- Dockerfile for training (Dockerfile.train)
-- Dockerfile for inference (Dockerfile.infer)
+- Dockerfile for training (Dockerfile.train) that specifies the base image (e.g., pytorch/pytorch:latest or tensorflow/tensorflow:latest)
+- Dockerfile for inference (Dockerfile.infer) that specifies the base image (e.g., pytorch/pytorch:latest or tensorflow/tensorflow:latest)
 - Kubernetes YAML for training job (train_deploy.yaml)
 - Kubernetes YAML for inference deployment/service (infer_deploy.yaml)
+- requirements.txt listing all Python dependencies
 - (Optional) DVC pipeline YAML (dvc.yaml) if data versioning is needed
 
 User prompt:
-\"\"\"
+"""
 {prompt}
-\"\"\"
+"""
 
 Return each file as a JSON object with keys: filename and content.
 Format your response as a JSON list:
 [
   {{"filename": "train.py", "content": "..."}},
   {{"filename": "inference.py", "content": "..."}},
-  ...
+  {{"filename": "Dockerfile.train", "content": "..."}},
+  {{"filename": "Dockerfile.infer", "content": "..."}},
+  {{"filename": "requirements.txt", "content": "..."}},
+  {{"filename": "train_deploy.yaml", "content": "..."}},
+  {{"filename": "infer_deploy.yaml", "content": "..."}}
 ]
-"""
+'''
             }
         ]
 

@@ -4,9 +4,11 @@ import yaml
 from typing import Dict, Any, List, Optional, Tuple
 from kubernetes import client, config, watch
 from kubernetes.client.rest import ApiException
-from kubernetes.stream import stream
+from kubernetes.stream import stream, portforward
 from command_router import CommandRouter  # Removed relative import
 from dvc_manager import DVCManager
+from datetime import datetime
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -760,6 +762,24 @@ roleRef:
             logger.error(f"Error getting secrets: {e}")
             return {"status": "error", "message": str(e)}
 
+    def get_storage_classes(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Get all available StorageClasses in the cluster."""
+        err = self._require_k8s()
+        if err:
+            return err
+        
+        try:
+            api_instance = client.StorageV1Api()
+            storage_classes = api_instance.list_storage_class()
+            sc_names = [sc.metadata.name for sc in storage_classes.items]
+            return {"status": "success", "storage_classes": sc_names}
+        except ApiException as e:
+            logger.error(f"Error getting StorageClasses: {e}")
+            return {"status": "error", "message": str(e)}
+        except Exception as e:
+            logger.error(f"Unexpected error getting StorageClasses: {e}")
+            return {"status": "error", "message": str(e)}
+
     def get_contexts(self, params):
         err = self._require_k8s()
         if err:
@@ -915,6 +935,8 @@ roleRef:
                 self.v1.delete_namespaced_config_map(name=name, namespace=namespace)
             elif kind == "secret":
                 self.v1.delete_namespaced_secret(name=name, namespace=namespace)
+            elif kind == "job":
+                self.batch_v1.delete_namespaced_job(name=name, namespace=namespace)
             else:
                 return {"status": "error", "message": f"Unsupported resource kind: {kind}"}
                 
@@ -1227,7 +1249,23 @@ roleRef:
         
         name = params.get("name", f"ml-{int(time.time())}")
         framework = params.get("framework", "pytorch")
-        
+        training_code = params.get("training_code", "")
+        inference_code = params.get("inference_code", "")
+        requirements_content = params.get("requirements_txt", "")
+        storage_class = params.get("storage_class")
+
+        # Dynamically determine storage class if not provided
+        if not storage_class:
+            sc_result = self.get_storage_classes({})
+            if sc_result["status"] == "success" and sc_result["storage_classes"]:
+                if "standard" in sc_result["storage_classes"]:
+                    storage_class = "standard"
+                else:
+                    storage_class = sc_result["storage_classes"][0]
+                logger.info(f"Using StorageClass: {storage_class}")
+            else:
+                return {"status": "error", "message": "No StorageClasses found in the cluster."}
+
         # Create ConfigMap for requirements
         requirements_yaml = {
             "apiVersion": "v1",
@@ -1236,13 +1274,31 @@ roleRef:
                 "name": f"{name}-requirements"
             },
             "data": {
-                "requirements.txt": "\n".join([
-                    "torch",
-                    "torchvision",
-                    "flask",
-                    "numpy",
-                    "pillow"
-                ])
+                "requirements.txt": requirements_content
+            }
+        }
+
+        # Create ConfigMap for training code
+        train_code_cm_yaml = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": f"{name}-train-code"
+            },
+            "data": {
+                "train.py": training_code
+            }
+        }
+
+        # Create ConfigMap for inference code
+        inference_code_cm_yaml = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": f"{name}-inference-code"
+            },
+            "data": {
+                "inference.py": inference_code
             }
         }
 
@@ -1253,6 +1309,7 @@ roleRef:
             "metadata": {"name": f"{name}-models"},
             "spec": {
                 "accessModes": ["ReadWriteOnce"],
+                "storageClassName": storage_class,
                 "resources": {"requests": {"storage": "1Gi"}}
             }
         }
@@ -1268,21 +1325,28 @@ roleRef:
                         "initContainers": [{
                             "name": "install-deps",
                             "image": "python:3.9",
-                            "command": ["pip", "install", "-r", "/requirements/requirements.txt"],
+                            "command": ["pip", "install", "-r", "/opt/app/requirements.txt"],
                             "volumeMounts": [{
                                 "name": "requirements",
-                                "mountPath": "/requirements"
+                                "mountPath": "/opt/app"
                             }]
                         }],
                         "containers": [{
                             "name": "trainer",
                             "image": "python:3.9",
-                            "command": ["python"],
-                            "args": ["-c", params.get("training_code", "")],
+                            "command": ["python", "/opt/app/train.py"],
                             "volumeMounts": [
                                 {
                                     "name": "model-storage",
                                     "mountPath": "/models"
+                                },
+                                {
+                                    "name": "training-code",
+                                    "mountPath": "/opt/app"
+                                },
+                                {
+                                    "name": "requirements",
+                                    "mountPath": "/opt/app"
                                 }
                             ],
                             "resources": {
@@ -1308,6 +1372,12 @@ roleRef:
                                 "configMap": {
                                     "name": f"{name}-requirements"
                                 }
+                            },
+                            {
+                                "name": "training-code",
+                                "configMap": {
+                                    "name": f"{name}-train-code"
+                                }
                             }
                         ],
                         "restartPolicy": "Never"
@@ -1330,21 +1400,28 @@ roleRef:
                         "initContainers": [{
                             "name": "install-deps",
                             "image": "python:3.9",
-                            "command": ["pip", "install", "-r", "/requirements/requirements.txt"],
+                            "command": ["pip", "install", "-r", "/opt/app/requirements.txt"],
                             "volumeMounts": [{
                                 "name": "requirements",
-                                "mountPath": "/requirements"
+                                "mountPath": "/opt/app"
                             }]
                         }],
                         "containers": [{
                             "name": "inference",
                             "image": "python:3.9",
-                            "command": ["python"],
-                            "args": ["-c", params.get("inference_code", "")],
+                            "command": ["python", "/opt/app/inference.py"],
                             "volumeMounts": [
                                 {
                                     "name": "model-storage",
                                     "mountPath": "/models"
+                                },
+                                {
+                                    "name": "inference-code",
+                                    "mountPath": "/opt/app"
+                                },
+                                {
+                                    "name": "requirements",
+                                    "mountPath": "/opt/app"
                                 }
                             ],
                             "ports": [{"containerPort": 8080}],
@@ -1371,6 +1448,12 @@ roleRef:
                                 "configMap": {
                                     "name": f"{name}-requirements"
                                 }
+                            },
+                            {
+                                "name": "inference-code",
+                                "configMap": {
+                                    "name": f"{name}-inference-code"
+                                }
                             }
                         ]
                     }
@@ -1393,7 +1476,9 @@ roleRef:
         try:
             # Apply resources in order
             resources = [
-                ("ConfigMap", requirements_yaml),
+                ("Requirements ConfigMap", requirements_yaml),
+                ("Training Code ConfigMap", train_code_cm_yaml),
+                ("Inference Code ConfigMap", inference_code_cm_yaml),
                 ("PVC", pvc_yaml),
                 ("Training Job", training_yaml),
                 ("Inference Deployment", inference_yaml),

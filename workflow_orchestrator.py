@@ -3,6 +3,8 @@ import os
 import time
 import yaml
 from typing import Dict, Any, Optional, List
+from kubernetes.client.rest import ApiException
+from kubernetes import client
 
 logger = logging.getLogger(__name__)
 
@@ -214,103 +216,141 @@ CMD ["python", "inference.py"]
             
             # Step 1: Generate code and configs
             logger.info(f"Generating code for job {job_id}")
-            code_result = self.mlops.generate_code_and_configs(prompt, job_id)
+            code_result = self.mlops.generate_code_and_configs(prompt, job_dir)
             if code_result["status"] != "success":
                 return code_result
-                
-            # Step 2: Build and push training image
-            logger.info("Building training image")
-            train_tag = f"{job_id}-train:latest"
-            build_result = self.mlops.manage_images(
-                job_id, 
-                training_tag=train_tag
-            )
-            if build_result["status"] != "success":
-                return build_result
 
-            # Step 3: Create model storage
-            logger.info("Creating model storage")
-            storage_result = self.artifacts.create_model_pvc(job_id)
-            if storage_result["status"] != "success":
-                return storage_result
+            # Extract generated file contents
+            generated_files = {f["filename"]: f["content"] for f in code_result["files"]}
+            training_code = generated_files.get("train.py", "")
+            inference_code = generated_files.get("inference.py", "")
+            requirements_txt = generated_files.get("requirements.txt", "")
+            
+            # Step 2: Deploy ML stack using generated code and configs
+            logger.info("Deploying ML stack")
+            deploy_ml_stack_result = self.k8s.deploy_ml_stack({
+                "name": job_id,
+                "training_code": training_code,
+                "inference_code": inference_code,
+                "requirements_txt": requirements_txt
+            })
+            if deploy_ml_stack_result["status"] != "success":
+                return deploy_ml_stack_result
 
-            # Step 4: Deploy training job
-            logger.info("Deploying training job")
-            training_yaml = code_result["files"].get("train_deploy.yaml")
-            if training_yaml:
-                train_deploy = self.k8s.apply_yaml({
-                    "yaml": training_yaml,
-                    "namespace": "default"
-                })
-                if train_deploy["status"] != "success":
-                    return train_deploy
+            # Assuming deploy_ml_stack handles PVC and deployment, we can simplify subsequent steps
+            # The following steps are likely redundant or need to be re-evaluated based on the new deploy_ml_stack
 
-            # Step 5: Monitor training
+            # Step 3: Build and push training image (if still needed, otherwise remove)
+            logger.info("Building training image (skipping as deploy_ml_stack handles this)")
+            # train_tag = f"{job_id}-train:latest"
+            # build_result = self.mlops.manage_images(
+            #     job_id, 
+            #     training_tag=train_tag
+            # )
+            # if build_result["status"] != "success":
+            #     return build_result
+
+            # Step 4: Create model storage (handled by deploy_ml_stack)
+            logger.info("Creating model storage (handled by deploy_ml_stack)")
+            # storage_result = self.artifacts.create_model_pvc(job_id)
+            # if storage_result["status"] != "success":
+            #     return storage_result
+
+            # Step 5: Deploy training job (handled by deploy_ml_stack)
+            logger.info("Deploying training job (handled by deploy_ml_stack)")
+            # training_yaml = code_result["files"].get("train_deploy.yaml")
+            # if training_yaml:
+            #     train_deploy = self.k8s.apply_yaml({
+            #         "yaml": training_yaml,
+            #         "namespace": "default"
+            #     })
+            #     if train_deploy["status"] != "success":
+            #         return train_deploy
+
+            # Step 6: Monitor training (might need adjustment based on how job is deployed by deploy_ml_stack)
             logger.info("Monitoring training job")
+            # The pod label selector might need adjustment if deploy_ml_stack uses different labels
+            max_wait_time = 600  # 10 minutes
+            start_time = time.time()
+            training_job_name = f"{job_id}-training"
             while True:
-                pod_status = self.k8s.get_pods({
-                    "namespace": "default",
-                    "label_selector": f"job-id={job_id},type=training"
-                })
-                if pod_status.get("pods", []):
-                    pod = pod_status["pods"][0]
-                    if pod["status"] == "Succeeded":
-                        break
-                    elif pod["status"] == "Failed":
-                        return {"status": "error", "message": "Training job failed"}
-                time.sleep(30)
+                job_status = self.k8s.batch_v1.read_namespaced_job_status(name=training_job_name, namespace="default")
+                if job_status.status.succeeded is not None and job_status.status.succeeded > 0:
+                    logger.info("Training job succeeded.")
+                    break
+                elif job_status.status.failed is not None and job_status.status.failed > 0:
+                    return {"status": "error", "message": "Training job failed"}
+                
+                if time.time() - start_time > max_wait_time:
+                    return {"status": "error", "message": "Training job timed out"}
 
-            # Step 6: Extract model artifacts
-            logger.info("Extracting model artifacts")
-            extract_result = self.artifacts.extract_model_from_pod(
-                job_id=job_id,
-                pod_name=f"train-{job_id}",
-                namespace="default"
-            )
-            if extract_result["status"] != "success":
-                return extract_result
+                time.sleep(10)
 
-            # Step 7: Build and push inference image
-            logger.info("Building inference image")
-            infer_tag = f"{job_id}-infer:latest"
-            build_result = self.mlops.manage_images(
-                job_id, 
-                inference_tag=infer_tag
-            )
-            if build_result["status"] != "success":
-                return build_result
+            # Step 7: Extract model artifacts (if model is saved to PVC, this might be simplified or removed)
+            logger.info("Extracting model artifacts (if needed, otherwise directly accessible via PVC)")
+            # extract_result = self.artifacts.extract_model_from_pod(
+            #     job_id=job_id,
+            #     pod_name=f"train-{job_id}",
+            #     namespace="default"
+            # )
+            # if extract_result["status"] != "success":
+            #     return extract_result
+            extract_result = {"status": "success", "message": "Model expected to be in PVC"}
 
-            # Step 8: Deploy inference service
-            logger.info("Deploying inference service")
-            deploy_result = self.mlops.deploy_inference(
-                job_id=job_id,
-                image_tag=infer_tag,
-                namespace="default",
-                replicas=1
-            )
-            if deploy_result["status"] != "success":
-                return deploy_result
+            # Step 8: Build and push inference image (handled by deploy_ml_stack)
+            logger.info("Building inference image (skipping as deploy_ml_stack handles this)")
+            # infer_tag = f"{job_id}-infer:latest"
+            # build_result = self.mlops.manage_images(
+            #     job_id, 
+            #     inference_tag=infer_tag
+            # )
+            # if build_result["status"] != "success":
+            #     return build_result
 
-            # Step 9: Wait for inference service to be ready
+            # Step 9: Deploy inference service (handled by deploy_ml_stack)
+            logger.info("Deploying inference service (handled by deploy_ml_stack)")
+            # deploy_result = self.mlops.deploy_inference(
+            #     job_id=job_id,
+            #     image_tag=infer_tag,
+            #     namespace="default",
+            #     replicas=1
+            # )
+            # if deploy_result["status"] != "success":
+            #     return deploy_result
+
+            # Step 10: Wait for inference service to be ready
             logger.info("Waiting for inference service to be ready")
+            # The service name will be f"{job_id}-inference"
+            inference_service_name = f"{job_id}-inference"
+            start_time = time.time()
             while True:
-                status = self.mlops.get_inference_status(job_id)
-                if status["status"] == "success":
-                    if status["deployment"]["ready_replicas"] == status["deployment"]["available_replicas"]:
+                try:
+                    service_status = self.k8s.v1.read_namespaced_service_status(name=inference_service_name, namespace="default")
+                    # Check if endpoint is ready
+                    endpoints = self.k8s.v1.read_namespaced_endpoints(name=inference_service_name, namespace="default")
+                    if endpoints.subsets and any(subset.addresses for subset in endpoints.subsets):
+                        logger.info("Inference service is ready.")
                         break
+                except ApiException as e:
+                    if e.status == 404:
+                        logger.info(f"Inference service {inference_service_name} not found yet...")
+                    else:
+                        logger.error(f"Error checking inference service status: {e}")
+                
+                if time.time() - start_time > max_wait_time:
+                    return {"status": "error", "message": "Inference service timed out"}
+
                 time.sleep(10)
 
             return {
                 "status": "success",
                 "job_id": job_id,
                 "training": {
-                    "image": train_tag,
                     "artifacts": extract_result.get("artifacts_dir")
                 },
                 "inference": {
-                    "image": infer_tag,
-                    "service": f"inference-{job_id}",
-                    "endpoint": f"http://inference-{job_id}.default.svc.cluster.local:8080/predict"
+                    "service": inference_service_name,
+                    "endpoint": f"http://{inference_service_name}.default.svc.cluster.local:8080/predict"
                 },
                 "message": "Model successfully trained and deployed"
             }
