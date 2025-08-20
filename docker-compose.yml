@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:14-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: k8smcp_db
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgresql://user:password@db:5432/k8smcp_db
+      CLAUDE_API_KEY: ${CLAUDE_API_KEY} # Pass Claude API key from host env
+    depends_on:
+      - db
+    volumes:
+      - .:/app # Mount current directory to allow for code changes during development
+      - /app/.venv # Exclude virtual environment from the mount
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_BACKEND_URL: http://localhost:8080 # Adjust if running on a different host
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app # Mount frontend directory for hot-reloading during development
+      - /app/node_modules # Exclude node_modules from the mount
+
+volumes:
+  db_data:

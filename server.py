@@ -739,6 +739,27 @@ def get_mcp_status():
     }
     return jsonify(status), 200
 
+@flask_app.route('/api/apply-yaml', methods=['POST'])
+@require_mcp_initialized
+def apply_yaml_route():
+    try:
+        data = request.get_json()
+        yaml_content = data.get('yaml')
+        if not yaml_content:
+            return jsonify({'error': 'No YAML content provided'}), 400
+
+        # Call the MCP tool to apply YAML
+        result = mcp_instance.apply_k8s_yaml_from_frontend(yaml_content=yaml_content)
+        
+        if result.get('status') == 'success':
+            return jsonify({'message': result.get('message', 'YAML applied successfully')}), 200
+        else:
+            return jsonify({'error': result.get('message', 'Failed to apply YAML')}), 500
+
+    except Exception as e:
+        logger.error(f"Error in /api/apply-yaml: {e}")
+        return jsonify({'error': str(e)}), 500
+
 # Helper function to check if MCP is initialized before calling tools
 def require_mcp_initialized(func):
     @wraps(func) # Use @wraps to preserve original function metadata
