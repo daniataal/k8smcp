@@ -90,20 +90,47 @@ def train(epochs):
             optimizer.step()
             
             if batch_idx % 100 == 0:
-                print(f'Train Epoch: {epoch+1} [{batch_idx * len(data)}/{len(train_
+                print(f'Train Epoch: {epoch+1} [{batch_idx * len(data)}/{len(train_loader.dataset)}]\tLoss: {loss.item():.6f}')
+
+# Testing function
+def test():
+    model.eval()
+    test_loss = 0
+    correct = 0
+    with torch.no_grad():
+        for data, target in test_loader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            test_loss += criterion(output, target).item()  # sum up batch loss
+            pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
+            correct += pred.eq(target.view_as(pred)).sum().item()
+
+    test_loss /= len(test_loader.dataset)
+
+    print(f'\nTest set: Average loss: {test_loss:.4f}, Accuracy: {correct}/{len(test_loader.dataset)} ({100. * correct / len(test_loader.dataset):.0f}%)\n')
+
+# Main function to run training and save the model
+def main():
+    epochs = 1
+    print("Starting training...")
+    train(epochs)
+    print("Training finished.")
+
+    print("Starting testing...")
+    test()
+    print("Testing finished.")
+    
+    # Save the model
+    os.makedirs('/mnt/model', exist_ok=True)
+    torch.save(model.state_dict(), '/mnt/model/mnist_cnn.pt')
+    print("Model saved to /mnt/model/mnist_cnn.pt")
+
+if __name__ == '__main__':
+    main()
 """,
-                "inference.py": """
-from flask import Flask, request, jsonify
-import torch
-import torch.nn.functional as F
-from torchvision import transforms
-from PIL import Image
-import io
-
-app = Flask(__name__)
-
-# Define CNN model for MNIST (same as in train.py)
-class MNISTNet(nn.Module):
+                "inference.py": self._generate_inference_script(
+                    model_name="MNISTNet",
+                    model_class_code="""class MNISTNet(nn.Module):
     def __init__(self):
         super(MNISTNet, self).__init__()
         self.conv1 = nn.Conv2d(1, 32, 3, 1)
@@ -125,38 +152,15 @@ class MNISTNet(nn.Module):
         x = F.relu(x)
         x = self.dropout2(x)
         x = self.fc2(x)
-        return F.log_softmax(x, dim=1)
-
-# Load the trained model
-model = MNISTNet()
-model.load_state_dict(torch.load("mnist_cnn.pt"))
-model.eval()
-
-# Define transformation
-transform = transforms.Compose([
+        return F.log_softmax(x, dim=1)""",
+                    model_load_logic="""model = MNISTNet()
+model.load_state_dict(torch.load('model.pt'))
+model.eval()""",
+                    transform_code="""transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize((0.1307,), (0.3081,))
-])
-
-@app.route('/predict', methods=['POST'])
-def predict():
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file provided'}), 400
-    
-    file = request.files['file']
-    img_bytes = file.read()
-    img = Image.open(io.BytesIO(img_bytes)).convert('L')
-    img = transform(img).unsqueeze(0)
-    
-    with torch.no_grad():
-        output = model(img)
-        pred = output.argmax(dim=1, keepdim=True)
-    
-    return jsonify({'prediction': pred.item()})
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
-""",
+])"""
+                ),
                 "Dockerfile.train": """
 FROM pytorch/pytorch:latest
 WORKDIR /app
@@ -173,6 +177,75 @@ CMD ["python", "inference.py"]
             },
             # Add more templates for common tasks
         }
+
+    def _generate_inference_script(self, model_name: str, model_class_code: str, model_load_logic: str, transform_code: str, model_file_name: str = "model.pt") -> str:
+        # Basic inference script template
+        # This will be refined as we generalize more.
+        return f"""
+from flask import Flask, request, jsonify
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision import transforms
+from PIL import Image
+import io
+import base64
+import numpy as np
+import os
+
+app = Flask(__name__)
+
+# Define model class
+{model_class_code}
+
+# Load the trained model
+def load_model(model_path):
+    {model_load_logic}
+    return model
+
+model_path = '/app/{model_file_name}' # Model is mounted at /app/ by default via PVC
+if not os.path.exists(model_path):
+    print(f"Error: Model not found at {{model_path}}")
+    exit(1)
+
+model = load_model(model_path)
+print("Model loaded successfully.")
+
+# Define transformation
+transform = {transform_code}
+
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({{'status': 'healthy', 'model': '{model_name}'}})
+
+@app.route('/predict', methods=['POST'])
+def predict_route():
+    try:
+        data = request.get_json()
+        if not data or 'image' not in data:
+            return jsonify({{'error': 'No image provided in JSON body'}}), 400
+
+        img_data = base64.b64decode(data['image'])
+        img = Image.open(io.BytesIO(img_data)).convert('L')
+        img_tensor = transform(img).unsqueeze(0)
+
+        with torch.no_grad():
+            output = model(img_tensor)
+            pred = output.argmax(dim=1, keepdim=True)
+            probabilities = torch.softmax(output, dim=1)
+            confidence = probabilities.max().item()
+        
+        return jsonify({{
+            'prediction': pred.item(), 
+            'confidence': round(confidence, 4),
+            'probabilities': probabilities.squeeze().tolist()
+        }})
+    except Exception as e:
+        return jsonify({{'error': str(e)}}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080, debug=False)
+"""
 
     def execute_workflow(self, prompt: str) -> Dict[str, Any]:
         """

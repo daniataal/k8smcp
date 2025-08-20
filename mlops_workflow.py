@@ -473,52 +473,62 @@ Format your response as a JSON list:
             namespace=namespace
         )
 
-    def deploy_registered_model(self, model_id: str, namespace: str = "default", replicas: int = 1) -> Dict[str, Any]:
-        """Deploys an inference service for a model registered in the model registry."""
-        model_details_result = self.model_registry.get_model_details(model_id)
-        if model_details_result["status"] != "success":
-            return {"status": "error", "message": f"Failed to get details for model {model_id}: {model_details_result.get('message', 'Unknown error')}"}
-        
-        model_details = model_details_result["model_details"]
-        job_id = model_details["job_id"]
-        model_path = model_details["model_path"]
+    def deploy_inference_service_with_code(self, job_id: str, model_id: str, inference_code: str, 
+                                         namespace: str = "default", replicas: int = 1,
+                                         resource_requests: Dict[str, str] = None,
+                                         resource_limits: Dict[str, str] = None) -> Dict[str, Any]:
+        """
+        Deploys an inference service for a trained model, using dynamically provided inference code.
+        This function creates a ConfigMap for the inference code before deploying.
+        """
+        try:
+            # 1. Create a ConfigMap for the inference code
+            config_map_name = f"{model_id}-inference-code"
+            config_map_yaml = f"""
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {config_map_name}
+  namespace: {namespace}
+data:
+  inference.py: |
+{inference_code}
+"""
+            logger.info(f"Creating ConfigMap {config_map_name} for model {model_id}.")
+            config_map_result = self.k8s.apply_yaml({"yaml": config_map_yaml})
+            if config_map_result["status"] != "success":
+                return {"status": "error", "message": f"Failed to create ConfigMap for inference code: {config_map_result.get('message', 'Unknown error')}"}
 
-        # Assuming the inference image is tagged with {job_id}-infer:latest
-        image_tag = f"{job_id}-infer:latest"
+            # 2. Ensure model artifacts are properly set up (e.g., PVC exists)
+            storage_result = self.artifact_manager.create_model_pvc(job_id, namespace)
+            if storage_result["status"] != "success":
+                return storage_result
 
-        # Simulate model validation before deployment
-        validation_result = self._simulate_model_validation(model_id, model_details)
-        if validation_result["status"] != "success":
-            return {"status": "error", "message": f"Model validation failed for {model_id}: {validation_result.get('message', 'Unknown validation error')}"}
+            # 3. Deploy the inference service, passing the config map name
+            # The inference_manager will need to be updated to mount this ConfigMap
+            image_tag = f"{job_id}-infer:latest"
+            deploy_result = self.inference_manager.deploy_inference_service(
+                job_id=job_id,
+                image=image_tag,
+                namespace=namespace,
+                replicas=replicas,
+                resource_requests=resource_requests,
+                resource_limits=resource_limits,
+                inference_config_map_name=config_map_name # Pass the ConfigMap name
+            )
 
-        logger.info(f"Deploying registered model {model_id} (job_id: {job_id}) using image {image_tag}")
-
-        deploy_result = self.inference_manager.deploy_inference_service(
-            job_id=job_id, # Reusing job_id for deployment naming convention
-            image=image_tag,
-            namespace=namespace,
-            replicas=replicas,
-            # resource_requests and limits would ideally come from model_details or a deployment config
-        )
-        
-        if deploy_result["status"] == "success":
-            self.model_registry.update_model_status(model_id, "deployed")
-            return {
-                "status": "success",
-                "message": f"Successfully deployed model {model_id}.",
-                "deployment_details": deploy_result
-            }
-        else:
-            return {"status": "error", "message": f"Failed to deploy model {model_id}: {deploy_result.get('message', 'Unknown deployment error')}"}
-
-    def _simulate_model_validation(self, model_id: str, model_details: Dict[str, Any]) -> Dict[str, Any]:
-        """Simulates a model validation process before deployment."""
-        logger.info(f"Simulating validation for model {model_id}...")
-        # In a real scenario, this would involve running tests, comparing metrics, etc.
-        # For now, a simple check or always success.
-        if model_details.get("metrics", {}).get("accuracy", 0) < 0.7: # Example validation rule
-            return {"status": "error", "message": "Simulated validation failed: Model accuracy too low."}
-        return {"status": "success", "message": "Simulated model validation passed."}
+            if deploy_result["status"] == "success":
+                self.model_registry.update_model_status(model_id, "deployed")
+                return {
+                    "status": "success",
+                    "message": f"Successfully deployed model {model_id} with dynamic code.",
+                    "deployment_details": deploy_result
+                }
+            else:
+                return {"status": "error", "message": f"Failed to deploy model {model_id}: {deploy_result.get('message', 'Unknown deployment error')}"}
+        except Exception as e:
+            logger.error(f"Error in deploy_inference_service_with_code for model {model_id}: {e}")
+            return {"status": "error", "message": f"An unexpected error occurred during deployment: {str(e)}"}
 
     def create_recommendation_model(self, task_description: str, data_format: str,
                                   features: List[str]) -> Dict[str, Any]:

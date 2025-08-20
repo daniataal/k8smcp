@@ -4,6 +4,7 @@ import os
 import sys
 import logging
 from typing import Dict, Any, List, Optional  # Add this import line
+import textwrap # Import textwrap
 
 # Add the current directory to the Python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -489,7 +490,45 @@ def create_mcp_server():
         @mcp.tool()
         def mlops_deploy_registered_model(model_id: str, namespace: str = "default", replicas: int = 1):
             """Deploys an inference service for a model registered in the model registry."""
-            return mlops_workflow.deploy_registered_model(model_id, namespace, replicas)
+            # 1. Retrieve model details from the ModelRegistry
+            model_details_result = mlops_workflow.model_registry.get_model_details(model_id)
+            if model_details_result["status"] != "success":
+                return model_details_result
+
+            model_details = model_details_result["model_details"]
+            job_id = model_details.get("job_id")
+            model_path = model_details.get("model_path")
+            
+            # For now, hardcode these; eventually, they should come from model_details metadata
+            model_name = model_details.get("model_name", "GenericModel") # e.g., "MNISTNet"
+            model_class_code = model_details.get("model_class_code", """class GenericModel(torch.nn.Module):\n    def __init__(self):\n        super(GenericModel, self).__init__()\n        # Define a simple linear layer as a placeholder\n        self.linear = torch.nn.Linear(784, 10)\n    def forward(self, x):\n        return torch.nn.functional.log_softmax(x.view(x.size(0), -1), dim=1)""")
+            model_file_name = os.path.basename(model_path) if model_path else "mnist_cnn.pt"
+            model_load_logic = model_details.get("model_load_logic", f"model = {model_name}()\nmodel.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))")
+            transform_code = model_details.get("transform_code", "transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))])")
+
+            # 2. Dynamically generate the inference_code
+            inference_code = workflow_orchestrator._generate_inference_script(
+                model_name=model_name,
+                model_class_code=model_class_code,
+                model_load_logic=model_load_logic,
+                transform_code=transform_code,
+                model_file_name=model_file_name # Pass the model file name
+            )
+            
+            # 3. Pass the dynamically generated inference_code to a new deployment function
+            # This new function will handle ConfigMap creation and deployment
+            # We need to make sure job_id is available here for consistent naming
+            if not job_id:
+                job_id = f"inference-{{model_id}}-{{int(time.time())}}"
+                logger.warning(f"Job ID not found for model {model_id}. Generating a new one: {job_id}")
+
+            return mlops_workflow.deploy_inference_service_with_code(
+                job_id=job_id,
+                model_id=model_id, # Pass model_id for naming consistent deployment
+                inference_code=inference_code,
+                namespace=namespace,
+                replicas=replicas
+            )
 
         @mcp.tool()
         def mlops_deploy_ml_stack(params: Dict[str, Any]):
@@ -625,7 +664,7 @@ def main():
 if __name__ == '__main__':
     main()
 """
-            inference_code = """
+            inference_code = textwrap.dedent("""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -669,23 +708,55 @@ def predict(model, image_bytes):
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,))
     ])
-    image = Image.open(io.BytesIO(image_bytes)).convert('L')
-    image = transform(image).unsqueeze(0)
-    output = model(image)
-    pred = output.argmax(dim=1, keepdim=True)
+    img = Image.open(io.BytesIO(image_bytes)).convert('L')
+    img_tensor = transform(img).unsqueeze(0)
+
+    with torch.no_grad():
+        output = model(img_tensor)
+        pred = output.argmax(dim=1, keepdim=True)
     return pred.item()
 
-model_path = '/mnt/model/mnist_cnn.pt'
-model = load_model(model_path)
+if __name__ == '__main__':
+    # This part of the code will run inside the Kubernetes pod
+    # It expects the model to be mounted at /mnt/model/mnist_cnn.pt
+    model_path = '/mnt/model/mnist_cnn.pt'
+    if not os.path.exists(model_path):
+        print(f"Error: Model not found at {model_path}")
+        exit(1)
 
-def handler(event, context):
-    image_bytes = event['body'].encode('latin1')
-    prediction = predict(model, image_bytes)
-    return {
-        'statusCode': 200,
-        'body': str(prediction)
-    }
-"""
+    model = load_model(model_path)
+    print("Model loaded successfully.")
+
+    from flask import Flask, request, jsonify
+    import base64
+    import numpy as np
+
+    app = Flask(__name__)
+
+    @app.route('/health', methods=['GET'])
+    def health():
+        return jsonify({'status': 'healthy', 'model': 'MNIST CNN'})
+
+    @app.route('/predict', methods=['POST'])
+    def predict_route():
+        try:
+            data = request.get_json()
+            if not data or 'image' not in data:
+                return jsonify({'error': 'No image provided in JSON body'}), 400
+
+            img_data = base64.b64decode(data['image'])
+            # Use the global predict function
+            prediction = predict(model, img_data)
+
+            return jsonify({'prediction': prediction})
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    print('Starting MNIST inference server...')
+    print('Model architecture:', model)
+    print('Server ready at http://0.0.0.0:8080')
+    app.run(host='0.0.0.0', port=8080, debug=False)
+""") # Closing parenthesis for textwrap.dedent
             config_map_train = f"""
 apiVersion: v1
 kind: ConfigMap

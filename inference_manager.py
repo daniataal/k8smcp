@@ -16,13 +16,45 @@ class InferenceManager:
     def generate_inference_yaml(self, job_id: str, image: str, model_path: str = "/app/model",
                               replicas: int = 1, port: int = 8080,
                               resource_requests: Dict[str, str] = None,
-                              resource_limits: Dict[str, str] = None) -> Dict[str, Any]:
+                              resource_limits: Dict[str, str] = None,
+                              inference_config_map_name: Optional[str] = None) -> Dict[str, Any]:
         """Generate Kubernetes YAML for inference deployment and service."""
         
         if not resource_requests:
             resource_requests = {"cpu": "500m", "memory": "1Gi"}
         if not resource_limits:
             resource_limits = {"cpu": "2", "memory": "4Gi"}
+
+        volumes = [{
+            "name": "model-storage",
+            "persistentVolumeClaim": {
+                "claimName": f"model-{job_id}"
+            }
+        }]
+        volume_mounts = [{
+            "name": "model-storage",
+            "mountPath": model_path
+        }]
+        
+        # If an inference ConfigMap is provided, add it as a volume mount
+        if inference_config_map_name:
+            volumes.append({
+                "name": "inference-code-volume",
+                "configMap": {
+                    "name": inference_config_map_name,
+                    "items": [
+                        {
+                            "key": "inference.py",
+                            "path": "inference.py"
+                        }
+                    ]
+                }
+            })
+            volume_mounts.append({
+                "name": "inference-code-volume",
+                "mountPath": "/app/inference.py", # Mount as a file
+                "subPath": "inference.py" # Specify the file within the configmap
+            })
 
         deployment = {
             "apiVersion": "apps/v1",
@@ -61,17 +93,11 @@ class InferenceManager:
                                 "requests": resource_requests,
                                 "limits": resource_limits
                             },
-                            "volumeMounts": [{
-                                "name": "model-storage",
-                                "mountPath": model_path
-                            }]
+                            "volumeMounts": volume_mounts,
+                            "command": ["python"],
+                            "args": ["/app/inference.py"]
                         }],
-                        "volumes": [{
-                            "name": "model-storage",
-                            "persistentVolumeClaim": {
-                                "claimName": f"model-{job_id}"
-                            }
-                        }]
+                        "volumes": volumes
                     }
                 }
             }
@@ -107,7 +133,7 @@ class InferenceManager:
         }
 
     def deploy_inference_service(self, job_id: str, image: str,
-                               namespace: str = "default", **kwargs) -> Dict[str, Any]:
+                               namespace: str = "default", inference_config_map_name: Optional[str] = None, **kwargs) -> Dict[str, Any]:
         """
         Deploy an inference service for a trained model.
         
@@ -115,11 +141,12 @@ class InferenceManager:
             job_id: Unique identifier for the job/model
             image: Docker image for inference
             namespace: Kubernetes namespace
+            inference_config_map_name: Name of the ConfigMap containing inference.py (optional)
             **kwargs: Additional args for generate_inference_yaml
         """
         try:
             # Generate YAML
-            manifests = self.generate_inference_yaml(job_id, image, **kwargs)
+            manifests = self.generate_inference_yaml(job_id, image, inference_config_map_name=inference_config_map_name, **kwargs)
             
             # Create deployment
             deployment = self.apps_v1.create_namespaced_deployment(
