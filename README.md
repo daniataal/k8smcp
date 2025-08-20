@@ -49,6 +49,7 @@ Before you begin, ensure you have the following installed:
 -   Node.js (LTS version) & npm or yarn
 -   Docker or Podman (for building and pushing container images)
 -   Kubernetes cluster (Minikube, Kind, or a cloud-based cluster) with `kubectl` configured
+-   PostgreSQL database (local or remote)
 -   (Optional) Claude API Key: Set as an environment variable `CLAUDE_API_KEY` for AI analysis features.
 
 ## Setup and Installation
@@ -72,7 +73,15 @@ Before you begin, ensure you have the following installed:
     pip install -r requirements.txt
     ```
 
-4.  **Kubernetes Configuration:**
+4.  **PostgreSQL Setup:**
+    -   Ensure you have a PostgreSQL database running and accessible.
+    -   Set the `DATABASE_URL` environment variable. Example:
+        ```bash
+        export DATABASE_URL="postgresql://user:password@localhost:5432/k8smcp_db"
+        ```
+        Replace `user`, `password`, `localhost:5432`, and `k8smcp_db` with your PostgreSQL credentials and database information.
+
+5.  **Kubernetes Configuration:**
     Ensure your `kubectl` is configured to connect to your Kubernetes cluster. The backend will attempt to load `kubeconfig` or in-cluster configuration.
 
 ### Frontend Setup
@@ -118,6 +127,16 @@ The frontend application will be accessible at `http://localhost:3000` (or anoth
 ### Connecting Kubernetes `kubeconfig`
 
 After launching both the backend and frontend, you will connect your Kubernetes `kubeconfig` through the frontend UI. This action will trigger the backend to initialize the FastMCP server and enable all Kubernetes and MLOps-related functionalities.
+
+### Data Migration (Optional)
+
+If you have existing model data in `model_registry/registered_models.json` from a previous setup, you can migrate it to the PostgreSQL database using the provided migration script. **Ensure your PostgreSQL database is running and `DATABASE_URL` is configured before running this.**
+
+```bash
+python3 migrate_data.py
+```
+
+After successful migration, you can optionally delete the `model_registry/registered_models.json` file.
 
 ## API Endpoints
 

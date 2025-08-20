@@ -6,6 +6,7 @@ import logging
 from typing import Dict, Any, List, Optional  # Add this import line
 import textwrap # Import textwrap
 import time
+from functools import wraps # Import wraps
 
 # Add the current directory to the Python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -740,6 +741,7 @@ def get_mcp_status():
 
 # Helper function to check if MCP is initialized before calling tools
 def require_mcp_initialized(func):
+    @wraps(func) # Use @wraps to preserve original function metadata
     def wrapper(*args, **kwargs):
         if mcp_instance is None:
             return jsonify({'error': 'MCP server not initialized. Please connect kubeconfig first.'}), 400
