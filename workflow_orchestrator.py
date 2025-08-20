@@ -7,6 +7,8 @@ from typing import Dict, Any, Optional, List
 from kubernetes.client.rest import ApiException
 from kubernetes import client
 
+from model_definitions import MODEL_CONFIGURATIONS # Import model configurations
+
 logger = logging.getLogger(__name__)
 
 class WorkflowOrchestrator:
@@ -247,241 +249,123 @@ if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=False)
 """
 
-    def execute_workflow(self, prompt: str) -> Dict[str, Any]:
+    def execute_workflow(self, workflow_params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Execute a complete MLOps workflow based on a natural language prompt.
-        
-        Examples:
-            - "Train an MNIST classifier using PyTorch and deploy it"
-            - "Build and deploy a sentiment analysis model"
-            - "Create an object detection service using YOLOv8"
+        Execute a complete MLOps workflow based on a structured dictionary of parameters.
+        This function orchestrates the steps like code generation, image building, 
+        model registration, and inference deployment.
         """
         try:
-            # Check if Claude is available
-            if not self.mlops.claude_analyzer.is_available():
-                logger.warning("Claude is not available. Using fallback templates.")
-                # Try to match prompt with fallback templates
-                if "mnist" in prompt.lower():
-                    template = self.fallback_templates["mnist"]
-                    job_id = f"mlops-{int(time.time())}"
-                    
-                    # Create job directory and save template files
-                    job_dir = os.path.join(self.mlops.base_dir, "mlops_jobs", job_id)
-                    os.makedirs(job_dir, exist_ok=True)
-                    
-                    for filename, content in template.items():
-                        with open(os.path.join(job_dir, filename), 'w') as f:
-                            f.write(content)
-                    
-                    return {
-                        "status": "success",
-                        "message": "Using fallback MNIST template",
-                        "job_id": job_id,
-                        "files": list(template.keys())
-                    }
-                else:
-                    return {
-                        "status": "error",
-                        "message": "Claude is not available and no matching template found for the requested task."
-                    }
+            model_type = workflow_params.get("model_type")
+            if not model_type:
+                return {"status": "error", "message": "'model_type' is required in workflow_params."}
 
-            # Generate unique job ID
-            job_id = f"mlops-{int(time.time())}"
-            
-            # Step 1: Generate code and configs
-            logger.info(f"Generating code for job {job_id}")
-            code_result = self.mlops.generate_code_and_configs(prompt, job_dir)
+            training_params = workflow_params.get("training_params", {})
+            deployment_params = workflow_params.get("deployment_params", {})
+            data_params = workflow_params.get("data_params", {})
+
+            # Step 1: Generate Code and Configurations
+            logger.info(f"Executing workflow for model type: {model_type}")
+            job_id = self.mlops.generate_job_dir(model_type)
+            code_result = self.mlops.generate_code_and_configs(
+                model_type=model_type,
+                job_dir=job_id,
+                data_path=data_params.get("path", "data") # Pass data_path to code generation
+            )
             if code_result["status"] != "success":
-                self.mlops._log_experiment_result(job_id, prompt, "failed", {"step": "generate_code", "details": code_result["message"]}, {}, {})
                 return code_result
-
-            # Extract generated file contents
-            generated_files = {f["filename"]: f["content"] for f in code_result["files"]}
-            training_code = generated_files.get("train.py", "")
-            inference_code = generated_files.get("inference.py", "")
-            requirements_txt = generated_files.get("requirements.txt", "")
             
-            # Step 2: Deploy ML stack using generated code and configs
-            logger.info("Deploying ML stack")
-            deploy_ml_stack_result = self.k8s.deploy_ml_stack({
-                "name": job_id,
-                "training_code": training_code,
-                "inference_code": inference_code,
-                "requirements_txt": requirements_txt
-            })
-            if deploy_ml_stack_result["status"] != "success":
-                self.mlops._log_experiment_result(job_id, prompt, "failed", {"step": "deploy_ml_stack", "details": deploy_ml_stack_result["message"]}, {}, {})
-                return deploy_ml_stack_result
+            # Step 2: Build Training Image
+            training_image_tag = f"{job_id}-train:latest"
+            logger.info(f"Building training image: {training_image_tag}")
+            build_train_result = self.mlops.build_image(
+                job_dir=job_id,
+                dockerfile="Dockerfile.train",
+                image_tag=training_image_tag
+            )
+            if build_train_result["status"] != "success":
+                return build_train_result
 
-            # Assuming deploy_ml_stack handles PVC and deployment, we can simplify subsequent steps
-            # The following steps are likely redundant or need to be re-evaluated based on the new deploy_ml_stack
+            # Step 3: Deploy and Monitor Training Job
+            logger.info(f"Deploying training job for model type: {model_type}")
+            train_job_deploy_result = self.mlops.deploy_training_job(
+                job_id=job_id,
+                image_tag=training_image_tag,
+                namespace=training_params.get("namespace", "default"),
+                resource_requests=training_params.get("resource_requests"),
+                resource_limits=training_params.get("resource_limits")
+            )
+            if train_job_deploy_result["status"] != "success":
+                return train_job_deploy_result
 
-            # Step 3: Build and push training image (if still needed, otherwise remove)
-            logger.info("Building training image (skipping as deploy_ml_stack handles this)")
-            # train_tag = f"{job_id}-train:latest"
-            # build_result = self.mlops.manage_images(
-            #     job_id, 
-            #     training_tag=train_tag
-            # )
-            # if build_result["status"] != "success":
-            #     return build_result
+            # Simulate conditional logic: Only proceed to deployment if training was successful
+            deploy_if_trained_success = deployment_params.get("deploy_if_trained_success", True)
 
-            # Step 4: Create model storage (handled by deploy_ml_stack)
-            logger.info("Creating model storage (handled by deploy_ml_stack)")
-            # storage_result = self.artifacts.create_model_pvc(job_id)
-            # if storage_result["status"] != "success":
-            #     return storage_result
+            if deploy_if_trained_success and train_job_deploy_result["status"] == "success":
+                # Step 4: Register Model
+                model_id = f"model-{job_id}"
+                logger.info(f"Registering model: {model_id}")
+                registered_model_path = f"/mnt/model/mnist_cnn.pt" # This should be the path within the training container
 
-            # Step 5: Deploy training job (handled by deploy_ml_stack)
-            logger.info("Deploying training job (handled by deploy_ml_stack)")
-            # training_yaml = code_result["files"].get("train_deploy.yaml")
-            # if training_yaml:
-            #     train_deploy = self.k8s.apply_yaml({
-            #         "yaml": training_yaml,
-            #         "namespace": "default"
-            #     })
-            #     if train_deploy["status"] != "success":
-            #         return train_deploy
+                registration_result = self.mlops.model_registry.register_model(
+                    model_id=model_id,
+                    job_id=job_id,
+                    model_path=registered_model_path, 
+                    metrics={"accuracy": 0.98, "loss": 0.05}, # Placeholder metrics
+                    hyperparameters={"epochs": training_params.get("epochs", 1)}, # Placeholder
+                    version=f"v1.0-{int(time.time())}"
+                )
+                if registration_result["status"] != "success":
+                    return registration_result
 
-            # Step 6: Monitor training (might need adjustment based on how job is deployed by deploy_ml_stack)
-            logger.info("Monitoring training job")
-            # The pod label selector might need adjustment if deploy_ml_stack uses different labels
-            max_wait_time = 600  # 10 minutes
-            start_time = time.time()
-            training_job_name = f"{job_id}-training"
-            while True:
-                try:
-                    job_status = self.k8s.batch_v1.read_namespaced_job_status(name=training_job_name, namespace="default")
-                    if job_status.status.succeeded is not None and job_status.status.succeeded > 0:
-                        logger.info("Training job succeeded.")
-                        self.mlops._log_experiment_result(job_id, prompt, "training_succeeded", {"job_name": training_job_name}, {"accuracy": 0.98}, {"epochs": 1})
-                        
-                        # Register the model after successful training
-                        # In a real scenario, model_path would be dynamically determined, e.g., from PVC
-                        model_path = f"/models/{job_id}/mnist_cnn.pt" # Assuming standard model name
-                        registration_result = self.mlops.model_registry.register_model(
-                            model_id=f"model-{job_id}",
-                            job_id=job_id,
-                            model_path=model_path,
-                            metrics={
-                                "accuracy": 0.98, # Placeholder
-                                "loss": 0.05 # Placeholder
-                            },
-                            hyperparameters={
-                                "epochs": 1, # Placeholder
-                                "learning_rate": 0.001 # Placeholder
-                            },
-                            version=f"v1.0-{int(time.time())}"
-                        )
-                        if registration_result["status"] == "success":
-                            logger.info(f"Model 'model-{job_id}' registered successfully.")
-                            self.mlops._log_experiment_result(job_id, prompt, "model_registered", registration_result["model_details"])
-                        else:
-                            logger.error(f"Failed to register model 'model-{job_id}': {registration_result['message']}")
-                            self.mlops._log_experiment_result(job_id, prompt, "model_registration_failed", {"error": registration_result["message"]})
-
-                        break
-                    elif job_status.status.failed is not None and job_status.status.failed > 0:
-                        self.mlops._log_experiment_result(job_id, prompt, "training_failed", {"job_name": training_job_name, "reason": "Job failed"}, {}, {})
-                        return {"status": "error", "message": "Training job failed"}
-                    
-                    if time.time() - start_time > max_wait_time:
-                        self.mlops._log_experiment_result(job_id, prompt, "training_timeout", {"job_name": training_job_name, "reason": "Timeout"}, {}, {})
-                        return {"status": "error", "message": "Training job timed out"}
-
-                except ApiException as e:
-                    if e.status == 404:
-                        logger.info(f"Training job {training_job_name} not found yet...")
-                    else:
-                        logger.error(f"Error checking training job status: {e}")
-                        self.mlops._log_experiment_result(job_id, prompt, "training_status_error", {"job_name": training_job_name, "error": str(e)}, {}, {})
-                        return {"status": "error", "message": f"Error checking training job status: {str(e)}"}
-                except Exception as e:
-                    logger.error(f"Unexpected error while monitoring training job {training_job_name}: {e}")
-                    self.mlops._log_experiment_result(job_id, prompt, "training_monitoring_error", {"job_name": training_job_name, "error": str(e)}, {}, {})
-                    return {"status": "error", "message": f"Unexpected error monitoring training job: {str(e)}"}
-
-                time.sleep(10)
-
-            # Step 7: Extract model artifacts (if model is saved to PVC, this might be simplified or removed)
-            logger.info("Extracting model artifacts (if needed, otherwise directly accessible via PVC)")
-            # extract_result = self.artifacts.extract_model_from_pod(
-            #     job_id=job_id,
-            #     pod_name=f"train-{job_id}",
-            #     namespace="default"
-            # )
-            # if extract_result["status"] != "success":
-            #     return extract_result
-            extract_result = {"status": "success", "message": "Model expected to be in PVC"}
-
-            # Step 8: Build and push inference image (handled by deploy_ml_stack)
-            logger.info("Building inference image (skipping as deploy_ml_stack handles this)")
-            # infer_tag = f"{job_id}-infer:latest"
-            # build_result = self.mlops.manage_images(
-            #     job_id, 
-            #     inference_tag=infer_tag
-            # )
-            # if build_result["status"] != "success":
-            #     return build_result
-
-            # Step 9: Deploy inference service (handled by deploy_ml_stack)
-            logger.info("Deploying inference service (handled by deploy_ml_stack)")
-            # deploy_result = self.mlops.deploy_inference(
-            #     job_id=job_id,
-            #     image_tag=infer_tag,
-            #     namespace="default",
-            #     replicas=1
-            # )
-            # if deploy_result["status"] != "success":
-            #     return deploy_result
-
-            # Step 10: Wait for inference service to be ready
-            logger.info("Waiting for inference service to be ready")
-            # The service name will be f"{job_id}-inference"
-            inference_service_name = f"{job_id}-inference"
-            start_time = time.time()
-            while True:
-                try:
-                    service_status = self.k8s.v1.read_namespaced_service_status(name=inference_service_name, namespace="default")
-                    # Check if endpoint is ready
-                    endpoints = self.k8s.v1.read_namespaced_endpoints(name=inference_service_name, namespace="default")
-                    if endpoints.subsets and any(subset.addresses for subset in endpoints.subsets):
-                        logger.info("Inference service is ready.")
-                        self.mlops._log_experiment_result(job_id, prompt, "inference_ready", {"service_name": inference_service_name}, {}, {})
-                        break
-                except ApiException as e:
-                    if e.status == 404:
-                        logger.info(f"Inference service {inference_service_name} not found yet...")
-                    else:
-                        logger.error(f"Error checking inference service status: {e}")
-                        self.mlops._log_experiment_result(job_id, prompt, "inference_status_error", {"service_name": inference_service_name, "error": str(e)}, {}, {})
-                        return {"status": "error", "message": f"Error checking inference service status: {str(e)}"}
+                # Step 5: Build Inference Image
+                inference_image_tag = f"{job_id}-infer:latest"
+                logger.info(f"Building inference image: {inference_image_tag}")
+                build_infer_result = self.mlops.build_image(
+                    job_dir=job_id,
+                    dockerfile="Dockerfile.infer",
+                    image_tag=inference_image_tag
+                )
+                if build_infer_result["status"] != "success":
+                    return build_infer_result
                 
-                if time.time() - start_time > max_wait_time:
-                    self.mlops._log_experiment_result(job_id, prompt, "inference_timeout", {"service_name": inference_service_name, "reason": "Timeout"}, {}, {})
-                    return {"status": "error", "message": "Inference service timed out"}
+                # Step 6: Deploy Inference Service
+                logger.info(f"Deploying inference service for model {model_id}")
+                # Retrieve the model details to get the inference code for deployment
+                model_details_result = self.mlops.model_registry.get_model_details(model_id)
+                if model_details_result["status"] != "success":
+                    return model_details_result
+                model_details = model_details_result["model_details"]
+                
+                # Re-generate inference code for deployment (as it contains model-specific details)
+                model_config = MODEL_CONFIGURATIONS[model_type]
+                model_file_name = os.path.basename(model_details["model_path"])
+                inference_code_for_deployment = self._generate_inference_script(
+                    model_name=model_config["model_name"],
+                    model_class_code=model_config["model_class_code"],
+                    model_load_logic=model_config["model_load_logic"],
+                    transform_code=model_config["transform_code"],
+                    model_file_name=model_file_name
+                )
 
-                time.sleep(10)
+                deploy_result = self.mlops.deploy_inference_service_with_code(
+                    job_id=job_id,
+                    model_id=model_id,
+                    inference_code=inference_code_for_deployment,
+                    namespace=deployment_params.get("namespace", "default"),
+                    replicas=deployment_params.get("replicas", 1)
+                )
+                if deploy_result["status"] != "success":
+                    return deploy_result
 
-            final_result = {
-                "status": "success",
-                "job_id": job_id,
-                "training": {
-                    "artifacts": extract_result.get("artifacts_dir")
-                },
-                "inference": {
-                    "service": inference_service_name,
-                    "endpoint": f"http://{inference_service_name}.default.svc.cluster.local:8080/predict"
-                },
-                "message": "Model successfully trained and deployed"
-            }
-            self.mlops._log_experiment_result(job_id, prompt, "workflow_succeeded", final_result, {"accuracy": 0.98}, {"epochs": 1})
-            return final_result
+                return {"status": "success", "message": f"Workflow completed for {model_type}. Model deployed.", "job_id": job_id}
+            else:
+                logger.info(f'Skipping deployment for {model_type} due to conditional check (deploy_if_trained_success={deploy_if_trained_success}, training_status={train_job_deploy_result["status"]}).')
+                return {"status": "success", "message": f"Workflow completed for {model_type}. Deployment skipped based on conditions.", "job_id": job_id}
 
         except Exception as e:
-            logger.error(f"Workflow failed: {e}")
-            self.mlops._log_experiment_result(job_id, prompt, "workflow_failed", {"error": str(e)}, {}, {})
-            return {"status": "error", "message": str(e)}
+            logger.error(f"Error executing workflow: {e}")
+            return {"status": "error", "message": f"An unexpected error occurred: {str(e)}"}
 
     def run_inference(self, job_id: str, data: Any) -> Dict[str, Any]:
         """

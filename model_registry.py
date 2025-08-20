@@ -109,3 +109,81 @@ class ModelRegistry:
         except Exception as e:
             logger.error(f"Error updating status for model '{model_id}': {e}")
             return {"status": "error", "message": f"Failed to update model status: {str(e)}"}
+
+    def promote_model(self, model_id: str, new_status: str, new_version: Optional[str] = None, 
+                      metadata_update: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Promotes a model to a new status (e.g., staging, production).
+        Optionally creates a new version entry and updates metadata.
+        """
+        result = self.get_model_details(model_id)
+        if result["status"] != "success":
+            return result # Model not found
+
+        current_model = result["model_details"]
+        old_status = current_model["status"]
+
+        # Update existing model's status
+        update_status_result = self.update_model_status(model_id, new_status)
+        if update_status_result["status"] != "success":
+            return update_status_result
+
+        # If a new version is provided, create a new entry for the promoted version
+        if new_version:
+            # Create a copy of the current model's details for the new version
+            new_model_entry = current_model.copy()
+            new_model_entry["model_id"] = f'{current_model["model_id"]}-{new_version}' # New model_id for the version
+            new_model_entry["version"] = new_version
+            new_model_entry["registered_at"] = time.time()
+            new_model_entry["status"] = new_status
+            if metadata_update:
+                new_model_entry["metadata"].update(metadata_update)
+
+            # Register the new version as a separate entry
+            register_result = self.register_model(
+                model_id=new_model_entry["model_id"],
+                job_id=new_model_entry["job_id"],
+                model_path=new_model_entry["model_path"],
+                metrics=new_model_entry["metrics"],
+                hyperparameters=new_model_entry["hyperparameters"],
+                version=new_model_entry["version"],
+                metadata=new_model_entry["metadata"]
+            )
+            if register_result["status"] != "success":
+                # If registration of new version fails, revert the status of the original model
+                self.update_model_status(model_id, old_status) 
+                return {"status": "error", "message": f"Failed to register new version {new_version} for model {model_id}: {register_result['message']}"}
+            
+            logger.info(f"Model '{model_id}' promoted to '{new_status}' with new version '{new_version}'.")
+            return {"status": "success", "message": f"Model '{model_id}' promoted to '{new_status}' with new version '{new_version}'.", "new_model_details": register_result["model_details"]}
+        
+        logger.info(f"Model '{model_id}' status updated from '{old_status}' to '{new_status}'.")
+        return {"status": "success", "message": f"Model '{model_id}' status updated to '{new_status}'."}
+
+    def rollback_model(self, current_model_id: str, target_model_id: str) -> Dict[str, Any]:
+        """
+        Rolls back the active model to a previous version specified by target_model_id.
+        Sets current_model_id to 'archived' and target_model_id to 'production'.
+        """
+        current_model_result = self.get_model_details(current_model_id)
+        if current_model_result["status"] != "success":
+            return current_model_result # Current model not found
+
+        target_model_result = self.get_model_details(target_model_id)
+        if target_model_result["status"] != "success":
+            return target_model_result # Target model not found
+
+        # Mark current model as archived
+        archive_result = self.update_model_status(current_model_id, "archived")
+        if archive_result["status"] != "success":
+            return archive_result
+
+        # Promote target model to production
+        promote_result = self.update_model_status(target_model_id, "production")
+        if promote_result["status"] != "success":
+            # If promotion fails, try to revert the archive status of the current model
+            self.update_model_status(current_model_id, "production") # Assuming it was in production
+            return promote_result
+
+        logger.info(f"Model '{current_model_id}' rolled back to '{target_model_id}'.")
+        return {"status": "success", "message": f"Model '{current_model_id}' rolled back to '{target_model_id}'."}

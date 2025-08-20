@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8smcp-server-deployment
+  labels:
+    app: k8smcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: k8smcp-server
+  template:
+    metadata:
+      labels:
+        app: k8smcp-server
+    spec:
+      containers:
+      - name: k8smcp-server
+        image: k8smcp-server:latest # Placeholder: You'll build this image locally
+        ports:
+        - containerPort: 8000
+        env:
+        - name: CLAUDE_API_KEY
+          value: "your_claude_api_key_here" # Replace with your actual Claude API key
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8smcp-server-service
+spec:
+  selector:
+    app: k8smcp-server
+  ports:
+    - protocol: TCP
+      port: 8080 # Service port (frontend will connect to this)
+      targetPort: 8000 # Container port
+      nodePort: 30080 # NodePort (accessible from outside the cluster, typically 30000-32767)
+  type: NodePort
