@@ -419,11 +419,11 @@ def create_mcp_server():
             
             if metrics.get("error_rate", 0) > 0.05:
                 health_status = "Needs Attention"
-                recommendations.append(f"High error rate ({metrics["error_rate"]*100:.2f}%). Check inference logs for errors.")
+                recommendations.append(f"High error rate ({metrics['error_rate']*100:.2f}%). Check inference logs for errors.")
 
             if metrics.get("prediction_latency_ms_avg", 0) > 100:
                 health_status = "Warning"
-                recommendations.append(f"High prediction latency ({metrics["prediction_latency_ms_avg"]}ms). Consider optimizing the model or scaling resources.")
+                recommendations.append(f"High prediction latency ({metrics['prediction_latency_ms_avg']}ms). Consider optimizing the model or scaling resources.")
 
             return {
                 "status": "success",

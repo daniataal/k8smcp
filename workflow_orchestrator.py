@@ -304,7 +304,7 @@ CMD ["python", "inference.py"]
                             logger.info(f"Model 'model-{job_id}' registered successfully.")
                             self.mlops._log_experiment_result(job_id, prompt, "model_registered", registration_result["model_details"])
                         else:
-                            logger.error(f"Failed to register model 'model-{job_id}': {registration_result["message"]}")
+                            logger.error(f"Failed to register model 'model-{job_id}': {registration_result['message']}")
                             self.mlops._log_experiment_result(job_id, prompt, "model_registration_failed", {"error": registration_result["message"]})
 
                         break

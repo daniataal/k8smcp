@@ -477,7 +477,7 @@ Format your response as a JSON list:
         """Deploys an inference service for a model registered in the model registry."""
         model_details_result = self.model_registry.get_model_details(model_id)
         if model_details_result["status"] != "success":
-            return {"status": "error", "message": f"Failed to get details for model {model_id}: {model_details_result.get("message", "Unknown error")}"}
+            return {"status": "error", "message": f"Failed to get details for model {model_id}: {model_details_result.get('message', 'Unknown error')}"}
         
         model_details = model_details_result["model_details"]
         job_id = model_details["job_id"]
@@ -489,7 +489,7 @@ Format your response as a JSON list:
         # Simulate model validation before deployment
         validation_result = self._simulate_model_validation(model_id, model_details)
         if validation_result["status"] != "success":
-            return {"status": "error", "message": f"Model validation failed for {model_id}: {validation_result.get("message", "Unknown validation error")}"}
+            return {"status": "error", "message": f"Model validation failed for {model_id}: {validation_result.get('message', 'Unknown validation error')}"}
 
         logger.info(f"Deploying registered model {model_id} (job_id: {job_id}) using image {image_tag}")
 
@@ -509,7 +509,7 @@ Format your response as a JSON list:
                 "deployment_details": deploy_result
             }
         else:
-            return {"status": "error", "message": f"Failed to deploy model {model_id}: {deploy_result.get("message", "Unknown deployment error")}"}
+            return {"status": "error", "message": f"Failed to deploy model {model_id}: {deploy_result.get('message', 'Unknown deployment error')}"}
 
     def _simulate_model_validation(self, model_id: str, model_details: Dict[str, Any]) -> Dict[str, Any]:
         """Simulates a model validation process before deployment."""
